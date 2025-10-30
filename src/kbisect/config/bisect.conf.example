@@ -99,9 +99,7 @@ console_logs:
   # Console logs are stored in database (build_logs table, log_type="console")
   # View with: kbisect logs list --log-type console
 
-# Logging
-logging:
-  level: INFO                       # DEBUG | INFO | WARNING | ERROR
-  file: bisect.log                  # Log file (default: ./bisect.log in current directory)
-  max_size_mb: 100
-  backup_count: 5
+# Application Logging
+# Logs are printed to terminal (stdout/stderr)
+# Use --verbose flag for DEBUG level output: kbisect --verbose start
+# Build logs and console logs are stored in the database (see console_logs section above)

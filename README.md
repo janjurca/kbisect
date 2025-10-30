@@ -30,11 +30,12 @@ Given a "good" kernel version (works) and a "bad" kernel version (broken), this 
 1. ✅ **Deploys** itself to a test machine (slave)
 2. ✅ **Protects** your production kernel from deletion
 3. ✅ **Builds** kernel commits via git bisect
-4. ✅ **Reboots** the test machine into new kernels
-5. ✅ **Tests** each kernel (boot test or custom scripts)
-6. ✅ **Recovers** from kernel panics and boot failures via IPMI
-7. ✅ **Manages** disk space automatically
-8. ✅ **Reports** the exact commit that introduced the bug
+4. ✅ **Captures** build logs and boot console output
+5. ✅ **Reboots** the test machine into new kernels
+6. ✅ **Tests** each kernel (boot test or custom scripts)
+7. ✅ **Recovers** from kernel panics and boot failures via IPMI (with retry logic)
+8. ✅ **Manages** disk space automatically
+9. ✅ **Reports** the exact commit that introduced the bug
 
 **No manual intervention required** - it handles reboots, failures, and cleanup automatically.
 
@@ -47,19 +48,25 @@ Given a "good" kernel version (works) and a "bad" kernel version (broken), this 
 - Slave/test machine (where kernels will be built and tested)
 - SSH access from master to slave (root, passwordless)
 - IPMI access to slave (optional but recommended for recovery)
+- Conserver access (optional, for console log collection during boot)
 - Kernel source on slave: `/root/kernel` (git clone of linux repo)
 
 **5-Minute Setup:**
 
 ```bash
 # 1. On master: Install system dependencies
-sudo dnf install python3 python3-pip ipmitool git  # or apt-get on Debian/Ubuntu
+# Required: python3, pip, ipmitool (for IPMI), git
+# Optional: conserver-client (for console log collection)
+sudo dnf install python3 python3-pip ipmitool git conserver-client  # RHEL/Fedora
+# or for Debian/Ubuntu:
+# sudo apt-get install python3 python3-pip ipmitool git conserver-client
 
-# 2. Clone and install kbisect
-cd ~/projects
-git clone <this-repo> kbisect
-cd kbisect
-pip install .  # or: pipx install . / pip install --user .
+# 2. Install kbisect directly from GitHub
+pip install git+https://github.com/janjurca/kbisect.git
+# or using pipx (recommended for CLI tools):
+# pipx install git+https://github.com/janjurca/kbisect.git
+# or user installation (no sudo):
+# pip install --user git+https://github.com/janjurca/kbisect.git
 
 # 3. Setup SSH keys (passwordless access to slave)
 ssh-keygen -t ed25519
@@ -82,7 +89,8 @@ vim bisect.yaml
 # 7. Run bisection!
 kbisect init v6.1 v6.6    # Replace with your good/bad versions
 kbisect start
-# Creates: ./bisect.db (database) and ./bisect.log (logs)
+# Creates: ./bisect.db (database)
+# Logs are printed to terminal (stdout/stderr)
 ```
 
 That's it! The tool will now bisect automatically. Check progress with `kbisect status`.
@@ -111,14 +119,17 @@ That's it! The tool will now bisect automatically. Check progress with `kbisect 
 
 1. **Master** tells slave to build kernel for commit X via SSH
 2. **Slave** builds kernel, installs it, sets as **one-time boot** (grub-reboot)
-3. **Master** captures kernel config file for later analysis
-4. **Master** reboots slave
-5. **Master** waits for slave to boot (monitors SSH connectivity)
-6. **Master** verifies correct kernel booted (detects panics via kernel version check)
-7. **Master** collects system metadata (kernel version, modules, etc.)
-8. **Master** runs test script on slave (default: boot success test)
-9. **Master** marks commit as good/bad/skip in git bisect
-10. **Repeat** until exact commit found
+3. **Master** stores compressed build log in database
+4. **Master** starts console log collection (if configured) - conserver or IPMI SOL
+5. **Master** reboots slave
+6. **Master** waits for slave to boot (monitors SSH connectivity)
+7. **Master** stops console collection and stores boot log in database
+8. **Master** verifies correct kernel booted (detects panics via kernel version check)
+9. **Master** captures kernel config file for later analysis
+10. **Master** collects system metadata (kernel version, modules, etc.)
+11. **Master** runs test script on slave (default: boot success test)
+12. **Master** marks commit as good/bad/skip in git bisect
+13. **Repeat** until exact commit found
 
 **Boot failure handling:**
 - If kernel panics or hangs → IPMI recovery if configured → Falls back to protected kernel
@@ -138,37 +149,37 @@ The master machine runs the `kbisect` CLI tool and orchestrates the bisection.
 
 ```bash
 # RHEL/Fedora/Rocky
-sudo dnf install python3 python3-pip ipmitool git
+# Required: python3, pip, ipmitool (for IPMI), git
+# Optional: conserver-client (for console log collection)
+sudo dnf install python3 python3-pip ipmitool git conserver-client
 
 # Debian/Ubuntu
-sudo apt-get install python3 python3-pip ipmitool git
+sudo apt-get install python3 python3-pip ipmitool git conserver-client
+
+# Note: conserver-client is optional but recommended for console log collection
+# If not available, IPMI SOL will be used as fallback (requires IPMI configured)
 
 # Verify Python 3.8+
 python3 --version
 ```
 
-**2. Clone repository:**
+**2. Install kbisect:**
+
+Choose the installation method based on your use case:
 
 ```bash
-# Clone to your preferred location
-cd ~/projects  # or /opt, or anywhere you prefer
-git clone <repository-url> kbisect
-cd kbisect
-```
+# Option A: Install from GitHub (recommended for end users)
+pip install git+https://github.com/janjurca/kbisect.git
 
-**3. Install kbisect via pip:**
-
-Choose one of the following installation methods:
-
-```bash
-# Option A: Regular installation (recommended for users)
-pip install .
-
-# Option B: Development installation (for contributors)
+# Option B: Clone and install in development mode (for contributors)
 # This creates a symlink, so code changes are immediately active
+git clone https://github.com/janjurca/kbisect.git
+cd kbisect
 pip install -e .
 
-# Option C: With development tools (ruff, mypy, pytest)
+# Option C: Development installation with dev tools (ruff, mypy, pytest)
+git clone https://github.com/janjurca/kbisect.git
+cd kbisect
 pip install -e ".[dev]"
 
 # Verify installation
@@ -178,18 +189,18 @@ kbisect --help
 **Note:** If you get a "externally managed environment" error, use one of these approaches:
 ```bash
 # Approach 1: Use pipx (recommended for CLI tools)
-pipx install .
+pipx install git+https://github.com/janjurca/kbisect.git
 
 # Approach 2: Use a virtual environment
 python3 -m venv venv
 source venv/bin/activate
-pip install .
+pip install git+https://github.com/janjurca/kbisect.git
 
 # Approach 3: User installation (no sudo needed)
-pip install --user .
+pip install --user git+https://github.com/janjurca/kbisect.git
 ```
 
-**4. Setup SSH keys:**
+**3. Setup SSH keys:**
 
 ```bash
 # Generate SSH key if you don't have one
@@ -202,7 +213,7 @@ ssh-copy-id root@<slave-ip>
 ssh root@<slave-ip> 'echo "SSH works"'
 ```
 
-**5. Configuration is per-directory:**
+**4. Configuration is per-directory:**
 
 Each bisection case gets its own directory with its own config file:
 
@@ -214,8 +225,8 @@ cd ~/my-bisection
 # Copy and customize config from the installed package
 python3 -c "import kbisect; from pathlib import Path; import shutil; src = Path(kbisect.__file__).parent / 'config' / 'bisect.conf.example'; shutil.copy(src, 'bisect.yaml')"
 
-# Or manually copy from the cloned repository
-cp ~/projects/kbisect/src/kbisect/config/bisect.conf.example ./bisect.yaml
+# Or manually copy from cloned repository (if you cloned for development)
+# cp ~/projects/kbisect/src/kbisect/config/bisect.conf.example ./bisect.yaml
 
 # Edit the config
 vim bisect.yaml
@@ -303,22 +314,14 @@ The tool will now:
 **Monitor progress:**
 
 ```bash
-# Check current status
+# Check current status (queries database, read-only)
 kbisect status
 
-# View output:
-# === Bisection Status ===
-# Session ID:   1
-# Status:       running
-# Good commit:  v6.1
-# Bad commit:   v6.6
-# Total iterations: 5
-#
-# Recent iterations:
-#   1. a1b2c3d | good    | 180s  | mm: add new feature X
-#   2. d4e5f6g | good    | 175s  | net: improve performance
-#   3. g7h8i9j | bad     | 190s  | fs: change buffer handling
-#   ...
+# Shows:
+# - Session status (running/completed/halted)
+# - Good/bad commits and timestamps
+# - Total iterations and last 5 iterations with results
+# - First bad commit (if found)
 ```
 
 **When complete:**
@@ -467,7 +470,30 @@ fi
 # Check status (before starting, after Ctrl+C, or from another terminal)
 kbisect status
 
-# Output shows: session ID, good/bad commits, iterations, recent results
+# This command:
+# - Queries the SQLite database (read-only, no slave connection)
+# - Shows session info: ID, status (running/completed/halted), commits, timestamps
+# - Shows total iteration count and LAST 5 iterations with results
+# - Displays first bad commit if found
+# - Safe to run anytime, does not modify state
+
+# Example output:
+# === Bisection Status ===
+#
+# Session ID:   1
+# Status:       running
+# Good commit:  v6.1
+# Bad commit:   v6.6
+# Started:      2024-01-15 10:23:45
+#
+# Total iterations: 8
+#
+# Recent iterations:
+#   4. d4e5f6g | good    | 180s  | mm: add new feature X
+#   5. a1b2c3d | good    | 175s  | net: improve performance
+#   6. g7h8i9j | bad     | 190s  | fs: change buffer handling
+#   7. x9y8z7a | skip    | 45s   | driver: update (build failed)
+#   8. m5n6o7p | running | N/A   | sched: optimize task handling
 ```
 
 **Monitor slave health:**
@@ -563,9 +589,9 @@ deployment:
 
 # Timeouts (in seconds)
 timeouts:
-  boot: 300                       # Boot timeout
-  test: 600                       # Test timeout
-  build: 1800                     # Build timeout (30 minutes)
+  boot: 300                       # Max time to wait for slave to boot (default: 300s)
+  test: 600                       # Max time for test script execution (default: 600s)
+  build: 1800                     # Max time for kernel build (default: 1800s / 30 min)
 
 # Disk space management
 disk_management:
@@ -616,12 +642,21 @@ metadata:
   compress_large_data: true         # Gzip large metadata files
   # Note: Metadata is stored in state_dir (default: current directory)
 
-# Logging
-logging:
-  level: INFO                       # DEBUG | INFO | WARNING | ERROR
-  file: bisect.log                  # Log file (default: ./bisect.log in current directory)
-  max_size_mb: 100
-  backup_count: 5
+# Console log collection (captures boot process output)
+console_logs:
+  enabled: false                    # Enable console log collection during boot
+  collector: "auto"                 # "conserver" | "ipmi" | "auto"
+  # Override hostname for console connection (default: uses slave hostname)
+  hostname: null
+  # Fall back to IPMI SOL if conserver fails (default: true)
+  fallback_to_ipmi: true
+  # Console logs are stored in database (build_logs table, log_type="console")
+  # View with: kbisect logs list --log-type console
+  # Requires: 'console' command (conserver) or IPMI configured
+
+# Note: Application logs are printed to terminal (stdout/stderr)
+# Use --verbose flag for DEBUG level output: kbisect --verbose start
+# Build logs and console logs are stored in the database (see console_logs above)
 ```
 
 ### Security Considerations
@@ -685,6 +720,78 @@ diff ./configs/config-6.5.0-bisect-a1b2c3d \
      ./configs/config-6.5.0-bisect-d4e5f6g
 ```
 
+### Build Logs and Console Log Collection
+
+**Build logs** are automatically captured and stored in the database with gzip compression:
+
+```bash
+# List all build logs
+kbisect logs list
+
+# Output:
+# Log ID   Iter   Commit    Type     Status     Size       Timestamp
+# -----------------------------------------------------------------------
+# 1        1      a1b2c3d   build    SUCCESS    45.2 KB    2024-01-15 10:23:45
+# 2        1      a1b2c3d   console  SUCCESS    12.1 KB    2024-01-15 10:28:12
+# 3        2      d4e5f6g   build    FAILED     67.8 KB    2024-01-15 11:15:30
+
+# View specific build log
+kbisect logs show 3
+
+# View all logs for an iteration
+kbisect logs iteration 2
+
+# Export log to file
+kbisect logs export 3 /tmp/build-log.txt
+```
+
+**Console log collection** captures serial console output during boot (requires configuration):
+
+- **Conserver** (default): Uses `console <hostname>` command for console access
+  - Requires conserver server configured and accessible from master
+  - Authentication via kerberos or conserver config file
+  - Non-blocking: runs in background thread during boot
+
+- **IPMI SOL** (fallback): Uses IPMI Serial-Over-LAN for console access
+  - Automatically used if conserver fails or unavailable
+  - Requires IPMI configured in bisect.yaml
+
+**Enable console log collection:**
+
+```bash
+# Option 1: Via CLI flag
+kbisect init v6.1 v6.6 --collect-console-logs
+kbisect start --collect-console-logs
+
+# Option 2: In config file (applies to that bisection directory)
+# bisect.yaml:
+console_logs:
+  enabled: true
+  collector: "auto"  # Try conserver first, fall back to IPMI SOL
+  fallback_to_ipmi: true
+```
+
+**Console log usage:**
+
+```bash
+# List console logs
+kbisect logs list --log-type console
+
+# View console log for specific iteration
+kbisect logs iteration 3
+# Shows both build log and console log if captured
+
+# Export console log
+kbisect logs show <log-id>
+```
+
+**Use cases for console logs:**
+- Debug kernel panics (see exact panic message and stack trace)
+- Identify boot hangs (see where boot process stops)
+- Analyze early boot issues (before SSH is available)
+- Capture firmware/BIOS messages
+- Debug bootloader issues
+
 ### Disk Space Management
 
 **Automatic cleanup** when /boot gets full:
@@ -732,15 +839,32 @@ The tool uses **one-time boot** mechanism to automatically detect and recover fr
    - **Boot timeout (kernel hangs during boot)**:
      - Slave doesn't respond to SSH within timeout (default 300s)
      - **If IPMI configured**: Master triggers IPMI power cycle for recovery
+       - Automatic retry logic: up to 3 recovery attempts with 30s delays
+       - Each attempt: power cycle → wait for boot → verify SSH connectivity
+       - If any attempt succeeds → marks commit and continues bisection
+       - If all attempts fail → session marked as "halted" (see below)
      - Slave reboots and falls back to protected kernel (one-time boot)
      - Boot test → marked **BAD** ✗ (kernel failed to boot)
      - Custom test → marked **SKIP** ⊘ (can't test functionality)
      - **If IPMI not configured**: Manual intervention required
 
-   - **IPMI recovery unavailable**:
-     - If IPMI fails or not configured and slave doesn't respond
-     - Manual power cycle required
-     - Slave will boot protected kernel after manual reboot
+   - **Complete recovery failure (all IPMI retries exhausted)**:
+     - If all 3 IPMI recovery attempts fail and slave remains unreachable
+     - **Session halted automatically**:
+       - Status changed to "halted" in database
+       - Git bisect state NOT updated yet (commit remains unmarked)
+       - Detailed error message logged with recovery instructions
+       - Bisection exits cleanly with exit code 1
+     - **Manual recovery required**:
+       1. Fix slave machine (power on, boot stable kernel manually)
+       2. Verify SSH connectivity
+       3. Run `kbisect start` to resume
+     - **On resume**:
+       - Tool detects halted session
+       - Verifies slave is reachable
+       - Marks pending commit appropriately (bad or skip)
+       - Continues bisection from next commit
+     - This ensures git bisect state stays synchronized even after complete failures
 
 **Example recovery flow (boot test mode):**
 ```
@@ -805,6 +929,7 @@ kbisect ipmi status
 - Master machine reboot
 - Network interruption
 - Manual cancellation (Ctrl+C)
+- Complete slave failure (session halted)
 
 ```bash
 # Resume automatically
@@ -812,7 +937,59 @@ kbisect start
 
 # Or check status first
 kbisect status
-# If session is "running", just run kbisect start to resume
+# If session is "running" or "halted", just run kbisect start to resume
+```
+
+**Halted session recovery:**
+
+If a session is marked as "halted" (slave became completely unreachable after all IPMI recovery attempts):
+
+```bash
+# 1. Fix the slave machine
+# - Manually power on or reboot the slave
+# - Ensure it boots into a stable kernel
+# - Verify SSH works: ssh root@<slave-ip>
+
+# 2. Resume bisection
+kbisect start
+
+# What happens on resume:
+# - Tool detects halted session
+# - Shows last failed iteration details
+# - Verifies slave is now reachable
+# - Marks pending commit (bad or skip based on test mode)
+# - Continues with next commit
+```
+
+Example output when resuming halted session:
+```
+======================================================================
+RESUMING HALTED BISECTION SESSION
+======================================================================
+
+Session ID: 1
+Good commit: v6.1
+Bad commit: v6.6
+Started: 2024-01-15 10:00:00
+
+Last iteration: 5
+Failed commit: abc123d
+Error: Boot timeout - kernel failed to boot (git mark pending - slave down)
+
+The previous session was halted due to slave being unreachable.
+Before resuming, please ensure:
+  1. The slave machine is powered on and stable
+  2. A stable kernel is booted
+  3. SSH connectivity is working
+
+Verifying slave connectivity...
+✓ Slave is reachable
+
+Marking pending commit abc123d...
+  Boot test mode: marking as BAD
+✓ Commit marked as bad
+Bisection will continue from next commit.
+======================================================================
 ```
 
 ---
@@ -955,6 +1132,66 @@ ssh root@slave 'source /root/kernel-bisect/lib/bisect-functions.sh && verify_pro
    sudo dnf install rsync
    ```
 
+### Console log collection not working
+
+**Symptoms:** Console logs are not being captured, or "Console log collection skipped" message.
+
+**Check:**
+
+1. **Console logs enabled:**
+   ```bash
+   # Check config file
+   cat ./bisect.yaml | grep -A 5 console_logs
+
+   # Or use CLI flag
+   kbisect start --collect-console-logs
+   ```
+
+2. **Conserver installed and configured:**
+   ```bash
+   # Test console command manually
+   console <slave-hostname>
+   # Should connect to slave's console (Ctrl+E c q to exit)
+
+   # If command not found, install conserver-client
+   sudo dnf install conserver-client  # RHEL/Fedora
+   sudo apt-get install conserver-client  # Debian/Ubuntu
+   ```
+
+3. **Conserver authentication:**
+   ```bash
+   # Check kerberos ticket if using kerberos auth
+   klist
+
+   # Or check conserver config file
+   cat ~/.consolerc
+   ```
+
+4. **IPMI SOL fallback (if conserver fails):**
+   ```bash
+   # Verify IPMI is configured in bisect.yaml
+   cat ./bisect.yaml | grep -A 3 ipmi
+
+   # Test IPMI SOL manually
+   ipmitool -I lanplus -H <ipmi-ip> -U <user> -P <pass> sol activate
+   # (Ctrl+] then . to exit)
+   ```
+
+5. **Check logs for specific errors:**
+   ```bash
+   # Logs are printed to terminal during kbisect execution
+   # To save logs to a file for later review:
+   kbisect start 2>&1 | tee bisection-output.log
+   # Look for "Console log collection" messages in the output
+   ```
+
+**Common issues:**
+
+- **Conserver authentication failure**: Configure kerberos or ~/.consolerc
+- **IPMI SOL timeout**: Check IPMI network connectivity
+- **Hostname mismatch**: Use `console_hostname` in config to override
+- **Console logs optional**: Bisection continues even if console collection fails
+
 ---
 
 ## Safety Features
@@ -1054,9 +1291,13 @@ Every cleanup operation checks:
 7. Loop: For each commit from git bisect
    ├─ Master: SSH call: build_kernel(commit_sha)
    ├─ Slave: Build kernel, install, set one-time boot (grub-reboot)
-   ├─ Master: Download /boot/config-<version>
+   ├─ Master: Store build log in SQLite (gzip compressed)
+   ├─ Master: Start console log collection (if enabled) - conserver or IPMI SOL
    ├─ Master: Reboot slave
    ├─ Master: Wait for SSH (boot detection)
+   ├─ Master: Stop console collection, store boot log in SQLite
+   ├─ Master: Verify kernel version (detect panics)
+   ├─ Master: Download /boot/config-<version>
    ├─ Master: SSH call: collect_metadata("iteration")
    ├─ Master: SSH call: run_test(test_type)
    ├─ Master: Record result in SQLite
@@ -1080,7 +1321,8 @@ kernel-bisect/
 │   ├── state_manager.py          # SQLite state management
 │   ├── slave_deployer.py         # Automatic deployment
 │   ├── slave_monitor.py          # Boot detection
-│   └── ipmi_controller.py        # IPMI power control
+│   ├── ipmi_controller.py        # IPMI power control
+│   └── console_collector.py      # Console log collection (conserver/IPMI SOL)
 └── README.md
 
 Deployed to slave:
@@ -1091,11 +1333,12 @@ Deployed to slave:
 Created in bisection directory (master):
 your-bisection-dir/
 ├── bisect.yaml                   # Configuration file
-├── bisect.db                     # SQLite database (contains all metadata)
-├── bisect.log                    # Log file
+├── bisect.db                     # SQLite database (contains all metadata and logs)
 └── configs/                      # Kernel .config files
     ├── config-6.5.0-bisect-a1b2c3d
     └── config-6.5.0-bisect-d4e5f6g
+# Note: Application logs are printed to terminal
+# Build logs and console logs are stored in the database
 ```
 
 ### Database Schema
@@ -1131,6 +1374,12 @@ metadata_files (
 -- Detailed logs
 logs (
   log_id, iteration_id, log_type, timestamp, message
+)
+
+-- Build and console logs (compressed)
+build_logs (
+  log_id, iteration_id, log_type, timestamp,
+  log_content (BLOB), compressed, size_bytes, exit_code
 )
 ```
 
@@ -1327,7 +1576,8 @@ kbisect/
 │   │   ├── state_manager.py   # SQLite state management
 │   │   ├── slave_monitor.py   # Health monitoring
 │   │   ├── ipmi_controller.py # IPMI power control
-│   │   └── slave_deployer.py  # Automatic deployment
+│   │   ├── slave_deployer.py  # Automatic deployment
+│   │   └── console_collector.py # Console log collection
 │   ├── lib/                   # Bash library (deployed to slave)
 │   │   └── bisect-functions.sh
 │   └── config/                # Configuration templates
