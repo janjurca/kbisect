@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
-"""State Manager - Persistent state storage using SQLite.
+"""State Manager - Persistent state storage using SQLAlchemy ORM.
 
 Tracks bisection progress, test results, and generates reports.
+Migrated from raw sqlite3 to SQLAlchemy 2.0 for better type safety and maintainability.
 """
 
+import gzip
 import hashlib
 import json
 import logging
-import sqlite3
-import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import scoped_session, sessionmaker
+
+from kbisect.master.models import (
+    Base,
+    BuildLog,
+    Iteration,
+    Log,
+    Metadata,
+    MetadataFile,
+    Session as SessionModel,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -86,136 +99,55 @@ class TestIteration:
 
 
 class StateManager:
-    """Manage bisection state in SQLite database.
+    """Manage bisection state using SQLAlchemy ORM.
 
     Provides methods to create and manage bisection sessions, iterations,
     metadata, and generate reports.
 
     Attributes:
         db_path: Path to SQLite database file
-        conn: Database connection (None until initialized)
+        engine: SQLAlchemy engine
+        Session: Scoped session factory
     """
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH) -> None:
-        """Initialize state manager.
+        """Initialize state manager with SQLAlchemy.
 
         Args:
             db_path: Path to SQLite database file
         """
         self.db_path = db_path
-        self.conn: Optional[sqlite3.Connection] = None
-        self.db_lock = threading.Lock()  # Thread safety for SQLite operations
 
-        # Ensure directory exists (only needed if db_path contains subdirectories)
+        # Ensure directory exists
         db_parent = Path(db_path).parent
         if db_parent != Path():
             db_parent.mkdir(parents=True, exist_ok=True)
 
-        # Initialize database
+        # Create SQLAlchemy engine with connection pooling
+        # Use check_same_thread=False for thread safety
+        self.engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            echo=False,  # Set to True for SQL debugging
+        )
+
+        # Create scoped session factory (thread-safe)
+        session_factory = sessionmaker(bind=self.engine)
+        self.Session = scoped_session(session_factory)
+
+        # Initialize database schema
         self._init_database()
 
     def _init_database(self) -> None:
         """Initialize database schema."""
-        # Allow connection to be used from different threads
         try:
-            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-            self.conn.row_factory = sqlite3.Row
-        except sqlite3.Error as exc:
-            self.conn = None
-            msg = f"Failed to connect to database: {exc}"
+            # Create all tables if they don't exist
+            Base.metadata.create_all(self.engine)
+            logger.debug(f"Database initialized at {self.db_path}")
+        except Exception as exc:
+            msg = f"Failed to initialize database: {exc}"
             logger.error(msg)
             raise DatabaseError(msg) from exc
-
-        with self.db_lock:
-            # Create tables
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    good_commit TEXT NOT NULL,
-                    bad_commit TEXT NOT NULL,
-                    start_time TEXT NOT NULL,
-                    end_time TEXT,
-                    status TEXT NOT NULL DEFAULT 'running',
-                    result_commit TEXT,
-                    config JSON
-                )
-            """)
-
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS iterations (
-                    iteration_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id INTEGER NOT NULL,
-                    iteration_num INTEGER NOT NULL,
-                    commit_sha TEXT NOT NULL,
-                    commit_message TEXT,
-                    build_result TEXT,
-                    boot_result TEXT,
-                    test_result TEXT,
-                    final_result TEXT,
-                    start_time TEXT,
-                    end_time TEXT,
-                    duration INTEGER,
-                    error_message TEXT,
-                    kernel_version TEXT,
-                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-                )
-            """)
-
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS logs (
-                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    iteration_id INTEGER NOT NULL,
-                    log_type TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    FOREIGN KEY (iteration_id) REFERENCES iterations(iteration_id)
-                )
-            """)
-
-            # Build logs table
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS build_logs (
-                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    iteration_id INTEGER NOT NULL,
-                    log_type TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    log_content BLOB NOT NULL,
-                    compressed BOOLEAN DEFAULT 1,
-                    size_bytes INTEGER,
-                    exit_code INTEGER,
-                    FOREIGN KEY (iteration_id) REFERENCES iterations(iteration_id)
-                )
-            """)
-
-            # Metadata tables
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS metadata (
-                    metadata_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id INTEGER NOT NULL,
-                    iteration_id INTEGER NULL,
-                    collection_time TEXT NOT NULL,
-                    collection_type TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    metadata_hash TEXT,
-                    FOREIGN KEY (session_id) REFERENCES sessions(session_id),
-                    FOREIGN KEY (iteration_id) REFERENCES iterations(iteration_id)
-                )
-            """)
-
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS metadata_files (
-                    file_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    metadata_id INTEGER NOT NULL,
-                    file_type TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    file_hash TEXT,
-                    file_size INTEGER,
-                    compressed BOOLEAN DEFAULT 0,
-                    FOREIGN KEY (metadata_id) REFERENCES metadata(metadata_id)
-                )
-            """)
-
-            self.conn.commit()
 
     def create_session(
         self, good_commit: str, bad_commit: str, config: Optional[Dict[str, Any]] = None
@@ -233,35 +165,30 @@ class StateManager:
         Raises:
             DatabaseError: If session creation fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            new_session = SessionModel(
+                good_commit=good_commit,
+                bad_commit=bad_commit,
+                start_time=datetime.now(timezone.utc).isoformat(),
+                status="running",
+                config=json.dumps(config) if config else None,
+            )
 
-        with self.db_lock:
-            cursor = self.conn.cursor()
+            session.add(new_session)
+            session.commit()
+            session_id = new_session.session_id
 
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO sessions (good_commit, bad_commit, start_time, config)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        good_commit,
-                        bad_commit,
-                        datetime.now(timezone.utc).isoformat(),
-                        json.dumps(config) if config else None,
-                    ),
-                )
+            logger.info(f"Created bisection session {session_id}")
+            return session_id
 
-                self.conn.commit()
-                session_id = cursor.lastrowid
-
-                logger.info(f"Created bisection session {session_id}")
-                return session_id
-            except sqlite3.Error as exc:
-                msg = f"Failed to create session: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create session: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def get_session(self, session_id: int) -> Optional[BisectSession]:
         """Get session by ID.
@@ -272,27 +199,25 @@ class StateManager:
         Returns:
             BisectSession object or None if not found
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = select(SessionModel).where(SessionModel.session_id == session_id)
+            result = session.execute(stmt).scalar_one_or_none()
 
-        with self.db_lock:
-            cursor = self.conn.execute(
-                "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
-            )
-
-            row = cursor.fetchone()
-            if not row:
+            if not result:
                 return None
 
             return BisectSession(
-                session_id=row["session_id"],
-                good_commit=row["good_commit"],
-                bad_commit=row["bad_commit"],
-                start_time=row["start_time"],
-                end_time=row["end_time"],
-                status=row["status"],
-                result_commit=row["result_commit"],
+                session_id=result.session_id,
+                good_commit=result.good_commit,
+                bad_commit=result.bad_commit,
+                start_time=result.start_time,
+                end_time=result.end_time,
+                status=result.status,
+                result_commit=result.result_commit,
             )
+        finally:
+            session.close()
 
     def get_latest_session(self) -> Optional[BisectSession]:
         """Get most recent session.
@@ -300,27 +225,25 @@ class StateManager:
         Returns:
             BisectSession object or None if no sessions exist
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = select(SessionModel).order_by(SessionModel.session_id.desc()).limit(1)
+            result = session.execute(stmt).scalar_one_or_none()
 
-        with self.db_lock:
-            cursor = self.conn.execute(
-                "SELECT * FROM sessions ORDER BY session_id DESC LIMIT 1"
-            )
-
-            row = cursor.fetchone()
-            if not row:
+            if not result:
                 return None
 
             return BisectSession(
-                session_id=row["session_id"],
-                good_commit=row["good_commit"],
-                bad_commit=row["bad_commit"],
-                start_time=row["start_time"],
-                end_time=row["end_time"],
-                status=row["status"],
-                result_commit=row["result_commit"],
+                session_id=result.session_id,
+                good_commit=result.good_commit,
+                bad_commit=result.bad_commit,
+                start_time=result.start_time,
+                end_time=result.end_time,
+                status=result.status,
+                result_commit=result.result_commit,
             )
+        finally:
+            session.close()
 
     def get_or_create_session(
         self, good_commit: str, bad_commit: str, config: Optional[Dict[str, Any]] = None
@@ -328,7 +251,7 @@ class StateManager:
         """Get existing running session or create new one (atomic operation).
 
         This method prevents race conditions by atomically checking for and
-        creating sessions within a single database lock.
+        creating sessions within a single database transaction.
 
         Args:
             good_commit: Known good commit hash
@@ -341,47 +264,45 @@ class StateManager:
         Raises:
             DatabaseError: If session operation fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
-
-        with self.db_lock:
-            # Check for existing running session within the lock
-            cursor = self.conn.execute(
-                "SELECT session_id FROM sessions WHERE status = 'running' "
-                "ORDER BY session_id DESC LIMIT 1"
+        session = self.Session()
+        try:
+            # Check for existing running session
+            stmt = (
+                select(SessionModel)
+                .where(SessionModel.status == "running")
+                .order_by(SessionModel.session_id.desc())
+                .limit(1)
             )
-            row = cursor.fetchone()
+            existing = session.execute(stmt).scalar_one_or_none()
 
-            if row:
-                session_id = row["session_id"]
+            if existing:
+                session_id = existing.session_id
                 logger.info(f"Found existing running session {session_id}")
                 return session_id
 
-            # No running session found, create new one (still within lock)
-            cursor = self.conn.cursor()
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO sessions (good_commit, bad_commit, start_time, config)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        good_commit,
-                        bad_commit,
-                        datetime.now(timezone.utc).isoformat(),
-                        json.dumps(config) if config else None,
-                    ),
-                )
+            # No running session found, create new one
+            new_session = SessionModel(
+                good_commit=good_commit,
+                bad_commit=bad_commit,
+                start_time=datetime.now(timezone.utc).isoformat(),
+                status="running",
+                config=json.dumps(config) if config else None,
+            )
 
-                self.conn.commit()
-                session_id = cursor.lastrowid
+            session.add(new_session)
+            session.commit()
+            session_id = new_session.session_id
 
-                logger.info(f"Created new bisection session {session_id}")
-                return session_id
-            except sqlite3.Error as exc:
-                msg = f"Failed to create session: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+            logger.info(f"Created new bisection session {session_id}")
+            return session_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to get or create session: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def update_session(self, session_id: int, **kwargs: Any) -> None:
         """Update session fields.
@@ -393,37 +314,30 @@ class StateManager:
         Raises:
             DatabaseError: If update fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = select(SessionModel).where(SessionModel.session_id == session_id)
+            db_session = session.execute(stmt).scalar_one_or_none()
 
-        # Explicitly validate and map field names to prevent SQL injection
-        valid_fields = {"end_time", "status", "result_commit"}
-        updates = {k: v for k, v in kwargs.items() if k in valid_fields}
+            if not db_session:
+                logger.warning(f"Session {session_id} not found for update")
+                return
 
-        if not updates:
-            return
+            # Update allowed fields
+            valid_fields = {"end_time", "status", "result_commit"}
+            for field, value in kwargs.items():
+                if field in valid_fields:
+                    setattr(db_session, field, value)
 
-        # Build SET clause with explicit field names (safe from SQL injection)
-        set_parts = []
-        values = []
-        for field in ["end_time", "status", "result_commit"]:
-            if field in updates:
-                set_parts.append(f"{field} = ?")
-                values.append(updates[field])
+            session.commit()
 
-        set_clause = ", ".join(set_parts)
-        values.append(session_id)
-
-        with self.db_lock:
-            try:
-                self.conn.execute(
-                    f"UPDATE sessions SET {set_clause} WHERE session_id = ?", values
-                )
-                self.conn.commit()
-            except sqlite3.Error as exc:
-                msg = f"Failed to update session: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to update session: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def create_iteration(
         self, session_id: int, iteration_num: int, commit_sha: str, commit_message: str
@@ -442,37 +356,30 @@ class StateManager:
         Raises:
             DatabaseError: If iteration creation fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            new_iteration = Iteration(
+                session_id=session_id,
+                iteration_num=iteration_num,
+                commit_sha=commit_sha,
+                commit_message=commit_message,
+                start_time=datetime.now(timezone.utc).isoformat(),
+            )
 
-        with self.db_lock:
-            cursor = self.conn.cursor()
+            session.add(new_iteration)
+            session.commit()
+            iteration_id = new_iteration.iteration_id
 
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO iterations (
-                        session_id, iteration_num, commit_sha, commit_message, start_time
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session_id,
-                        iteration_num,
-                        commit_sha,
-                        commit_message,
-                        datetime.now(timezone.utc).isoformat(),
-                    ),
-                )
+            logger.debug(f"Created iteration {iteration_id}")
+            return iteration_id
 
-                self.conn.commit()
-                iteration_id = cursor.lastrowid
-
-                logger.debug(f"Created iteration {iteration_id}")
-                return iteration_id
-            except sqlite3.Error as exc:
-                msg = f"Failed to create iteration: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create iteration: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def update_iteration(self, iteration_id: int, **kwargs: Any) -> None:
         """Update iteration fields.
@@ -484,55 +391,39 @@ class StateManager:
         Raises:
             DatabaseError: If update fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = select(Iteration).where(Iteration.iteration_id == iteration_id)
+            db_iteration = session.execute(stmt).scalar_one_or_none()
 
-        # Explicitly validate and map field names to prevent SQL injection
-        valid_fields = {
-            "build_result",
-            "boot_result",
-            "test_result",
-            "final_result",
-            "end_time",
-            "duration",
-            "error_message",
-            "kernel_version",
-        }
-        updates = {k: v for k, v in kwargs.items() if k in valid_fields}
+            if not db_iteration:
+                logger.warning(f"Iteration {iteration_id} not found for update")
+                return
 
-        if not updates:
-            return
+            # Update allowed fields
+            valid_fields = {
+                "build_result",
+                "boot_result",
+                "test_result",
+                "final_result",
+                "end_time",
+                "duration",
+                "error_message",
+                "kernel_version",
+            }
+            for field, value in kwargs.items():
+                if field in valid_fields:
+                    setattr(db_iteration, field, value)
 
-        # Build SET clause with explicit field names (safe from SQL injection)
-        set_parts = []
-        values = []
-        for field in [
-            "build_result",
-            "boot_result",
-            "test_result",
-            "final_result",
-            "end_time",
-            "duration",
-            "error_message",
-            "kernel_version",
-        ]:
-            if field in updates:
-                set_parts.append(f"{field} = ?")
-                values.append(updates[field])
+            session.commit()
 
-        set_clause = ", ".join(set_parts)
-        values.append(iteration_id)
-
-        with self.db_lock:
-            try:
-                self.conn.execute(
-                    f"UPDATE iterations SET {set_clause} WHERE iteration_id = ?", values
-                )
-                self.conn.commit()
-            except sqlite3.Error as exc:
-                msg = f"Failed to update iteration: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to update iteration: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def get_iterations(self, session_id: int) -> List[TestIteration]:
         """Get all iterations for a session.
@@ -543,41 +434,39 @@ class StateManager:
         Returns:
             List of TestIteration objects
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
-
-        with self.db_lock:
-            cursor = self.conn.execute(
-                """
-                SELECT * FROM iterations
-                WHERE session_id = ?
-                ORDER BY iteration_num
-                """,
-                (session_id,),
+        session = self.Session()
+        try:
+            stmt = (
+                select(Iteration)
+                .where(Iteration.session_id == session_id)
+                .order_by(Iteration.iteration_num)
             )
+            results = session.execute(stmt).scalars().all()
 
             iterations = []
-            for row in cursor.fetchall():
+            for row in results:
                 iterations.append(
                     TestIteration(
-                        iteration_id=row["iteration_id"],
-                        session_id=row["session_id"],
-                        iteration_num=row["iteration_num"],
-                        commit_sha=row["commit_sha"],
-                        commit_message=row["commit_message"],
-                        build_result=row["build_result"],
-                        boot_result=row["boot_result"],
-                        test_result=row["test_result"],
-                        final_result=row["final_result"],
-                        start_time=row["start_time"],
-                        end_time=row["end_time"],
-                        duration=row["duration"],
-                        error_message=row["error_message"],
-                        kernel_version=row["kernel_version"],
+                        iteration_id=row.iteration_id,
+                        session_id=row.session_id,
+                        iteration_num=row.iteration_num,
+                        commit_sha=row.commit_sha,
+                        commit_message=row.commit_message,
+                        build_result=row.build_result,
+                        boot_result=row.boot_result,
+                        test_result=row.test_result,
+                        final_result=row.final_result,
+                        start_time=row.start_time,
+                        end_time=row.end_time,
+                        duration=row.duration,
+                        error_message=row.error_message,
+                        kernel_version=row.kernel_version,
                     )
                 )
 
             return iterations
+        finally:
+            session.close()
 
     def add_log(self, iteration_id: int, log_type: str, message: str) -> None:
         """Add log entry for an iteration.
@@ -590,23 +479,25 @@ class StateManager:
         Raises:
             DatabaseError: If log creation fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            new_log = Log(
+                iteration_id=iteration_id,
+                log_type=log_type,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                message=message,
+            )
 
-        with self.db_lock:
-            try:
-                self.conn.execute(
-                    """
-                    INSERT INTO logs (iteration_id, log_type, timestamp, message)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (iteration_id, log_type, datetime.now(timezone.utc).isoformat(), message),
-                )
-                self.conn.commit()
-            except sqlite3.Error as exc:
-                msg = f"Failed to add log: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+            session.add(new_log)
+            session.commit()
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to add log: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def get_logs(self, iteration_id: int) -> List[Dict[str, Any]]:
         """Get logs for an iteration.
@@ -617,20 +508,27 @@ class StateManager:
         Returns:
             List of log dictionaries
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
-
-        with self.db_lock:
-            cursor = self.conn.execute(
-                """
-                SELECT * FROM logs
-                WHERE iteration_id = ?
-                ORDER BY timestamp
-                """,
-                (iteration_id,),
+        session = self.Session()
+        try:
+            stmt = (
+                select(Log)
+                .where(Log.iteration_id == iteration_id)
+                .order_by(Log.timestamp)
             )
+            results = session.execute(stmt).scalars().all()
 
-            return [dict(row) for row in cursor.fetchall()]
+            return [
+                {
+                    "log_id": log.log_id,
+                    "iteration_id": log.iteration_id,
+                    "log_type": log.log_type,
+                    "timestamp": log.timestamp,
+                    "message": log.message,
+                }
+                for log in results
+            ]
+        finally:
+            session.close()
 
     def store_build_log(
         self, iteration_id: int, log_type: str, content: str, exit_code: int = 0
@@ -649,45 +547,36 @@ class StateManager:
         Raises:
             DatabaseError: If log storage fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            # Compress log content
+            compressed_content = gzip.compress(content.encode("utf-8"))
+            size_bytes = len(compressed_content)
 
-        import gzip
+            new_log = BuildLog(
+                iteration_id=iteration_id,
+                log_type=log_type,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                log_content=compressed_content,
+                compressed=True,
+                size_bytes=size_bytes,
+                exit_code=exit_code,
+            )
 
-        # Compress log content
-        compressed_content = gzip.compress(content.encode("utf-8"))
-        size_bytes = len(compressed_content)
+            session.add(new_log)
+            session.commit()
+            log_id = new_log.log_id
 
-        with self.db_lock:
-            cursor = self.conn.cursor()
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO build_logs (
-                        iteration_id, log_type, timestamp, log_content,
-                        compressed, size_bytes, exit_code
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        iteration_id,
-                        log_type,
-                        datetime.now(timezone.utc).isoformat(),
-                        compressed_content,
-                        True,
-                        size_bytes,
-                        exit_code,
-                    ),
-                )
+            logger.debug(f"Stored {log_type} log {log_id} ({size_bytes} bytes compressed)")
+            return log_id
 
-                self.conn.commit()
-                log_id = cursor.lastrowid
-
-                logger.debug(f"Stored {log_type} log {log_id} ({size_bytes} bytes compressed)")
-                return log_id
-            except sqlite3.Error as exc:
-                msg = f"Failed to store build log: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to store build log: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def get_build_log(self, log_id: int) -> Optional[Dict[str, Any]]:
         """Get and decompress build log by ID.
@@ -698,46 +587,42 @@ class StateManager:
         Returns:
             Dictionary with log data including decompressed content, or None if not found
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
-
-        import gzip
-
-        with self.db_lock:
-            cursor = self.conn.execute(
-                """
-                SELECT bl.*, i.iteration_num, i.commit_sha, i.commit_message
-                FROM build_logs bl
-                JOIN iterations i ON bl.iteration_id = i.iteration_id
-                WHERE bl.log_id = ?
-                """,
-                (log_id,),
+        session = self.Session()
+        try:
+            stmt = (
+                select(BuildLog, Iteration)
+                .join(Iteration, BuildLog.iteration_id == Iteration.iteration_id)
+                .where(BuildLog.log_id == log_id)
             )
+            result = session.execute(stmt).first()
 
-            row = cursor.fetchone()
-            if not row:
+            if not result:
                 return None
 
+            build_log, iteration = result
+
             # Decompress content
-            content = row["log_content"]
-            if row["compressed"]:
+            content = build_log.log_content
+            if build_log.compressed:
                 content = gzip.decompress(content).decode("utf-8")
             else:
                 content = content.decode("utf-8")
 
             return {
-                "log_id": row["log_id"],
-                "iteration_id": row["iteration_id"],
-                "iteration_num": row["iteration_num"],
-                "commit_sha": row["commit_sha"],
-                "commit_message": row["commit_message"],
-                "log_type": row["log_type"],
-                "timestamp": row["timestamp"],
+                "log_id": build_log.log_id,
+                "iteration_id": build_log.iteration_id,
+                "iteration_num": iteration.iteration_num,
+                "commit_sha": iteration.commit_sha,
+                "commit_message": iteration.commit_message,
+                "log_type": build_log.log_type,
+                "timestamp": build_log.timestamp,
                 "content": content,
-                "size_bytes": row["size_bytes"],
-                "exit_code": row["exit_code"],
-                "compressed": row["compressed"],
+                "size_bytes": build_log.size_bytes,
+                "exit_code": build_log.exit_code,
+                "compressed": build_log.compressed,
             }
+        finally:
+            session.close()
 
     def get_iteration_build_logs(self, iteration_id: int) -> List[Dict[str, Any]]:
         """Get all build logs for an iteration.
@@ -748,21 +633,27 @@ class StateManager:
         Returns:
             List of log metadata dictionaries (without content)
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
-
-        with self.db_lock:
-            cursor = self.conn.execute(
-                """
-                SELECT log_id, log_type, timestamp, size_bytes, exit_code
-                FROM build_logs
-                WHERE iteration_id = ?
-                ORDER BY timestamp
-                """,
-                (iteration_id,),
+        session = self.Session()
+        try:
+            stmt = (
+                select(BuildLog)
+                .where(BuildLog.iteration_id == iteration_id)
+                .order_by(BuildLog.timestamp)
             )
+            results = session.execute(stmt).scalars().all()
 
-            return [dict(row) for row in cursor.fetchall()]
+            return [
+                {
+                    "log_id": log.log_id,
+                    "log_type": log.log_type,
+                    "timestamp": log.timestamp,
+                    "size_bytes": log.size_bytes,
+                    "exit_code": log.exit_code,
+                }
+                for log in results
+            ]
+        finally:
+            session.close()
 
     def list_build_logs(
         self, session_id: Optional[int] = None, log_type: Optional[str] = None
@@ -776,43 +667,40 @@ class StateManager:
         Returns:
             List of log metadata dictionaries
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = (
+                select(BuildLog, Iteration)
+                .join(Iteration, BuildLog.iteration_id == Iteration.iteration_id)
+            )
 
-        query = """
-            SELECT
-                bl.log_id,
-                bl.iteration_id,
-                i.iteration_num,
-                i.commit_sha,
-                bl.log_type,
-                bl.timestamp,
-                bl.size_bytes,
-                bl.exit_code,
-                CASE WHEN bl.exit_code = 0 THEN 'SUCCESS' ELSE 'FAILED' END as status
-            FROM build_logs bl
-            JOIN iterations i ON bl.iteration_id = i.iteration_id
-        """
+            # Add filters
+            if session_id is not None:
+                stmt = stmt.where(Iteration.session_id == session_id)
+            if log_type is not None:
+                stmt = stmt.where(BuildLog.log_type == log_type)
 
-        conditions = []
-        params = []
+            stmt = stmt.order_by(BuildLog.timestamp.desc())
 
-        if session_id is not None:
-            conditions.append("i.session_id = ?")
-            params.append(session_id)
+            results = session.execute(stmt).all()
 
-        if log_type is not None:
-            conditions.append("bl.log_type = ?")
-            params.append(log_type)
+            logs = []
+            for build_log, iteration in results:
+                logs.append({
+                    "log_id": build_log.log_id,
+                    "iteration_id": build_log.iteration_id,
+                    "iteration_num": iteration.iteration_num,
+                    "commit_sha": iteration.commit_sha,
+                    "log_type": build_log.log_type,
+                    "timestamp": build_log.timestamp,
+                    "size_bytes": build_log.size_bytes,
+                    "exit_code": build_log.exit_code,
+                    "status": "SUCCESS" if build_log.exit_code == 0 else "FAILED",
+                })
 
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-
-        query += " ORDER BY bl.timestamp DESC"
-
-        with self.db_lock:
-            cursor = self.conn.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+            return logs
+        finally:
+            session.close()
 
     def store_metadata(
         self,
@@ -833,55 +721,48 @@ class StateManager:
         Raises:
             DatabaseError: If metadata storage fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            # Convert metadata to JSON
+            metadata_json = json.dumps(metadata_dict, sort_keys=True)
 
-        # Convert metadata to JSON
-        metadata_json = json.dumps(metadata_dict, sort_keys=True)
+            # Calculate hash for deduplication
+            metadata_hash = hashlib.sha256(metadata_json.encode()).hexdigest()
 
-        # Calculate hash for deduplication
-        metadata_hash = hashlib.sha256(metadata_json.encode()).hexdigest()
-
-        with self.db_lock:
             # Check if identical metadata already exists
-            cursor = self.conn.execute(
-                "SELECT metadata_id FROM metadata WHERE metadata_hash = ?", (metadata_hash,)
-            )
-            existing = cursor.fetchone()
+            stmt = select(Metadata).where(Metadata.metadata_hash == metadata_hash)
+            existing = session.execute(stmt).scalar_one_or_none()
 
             if existing:
                 logger.debug(f"Metadata already exists with hash {metadata_hash[:8]}")
-                return existing["metadata_id"]
+                return existing.metadata_id
 
             # Insert new metadata
-            cursor = self.conn.cursor()
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO metadata (
-                        session_id, iteration_id, collection_time,
-                        collection_type, metadata_json, metadata_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session_id,
-                        iteration_id,
-                        metadata_dict.get("collection_time", datetime.now(timezone.utc).isoformat()),
-                        metadata_dict.get("collection_type", "unknown"),
-                        metadata_json,
-                        metadata_hash,
-                    ),
-                )
+            new_metadata = Metadata(
+                session_id=session_id,
+                iteration_id=iteration_id,
+                collection_time=metadata_dict.get(
+                    "collection_time", datetime.now(timezone.utc).isoformat()
+                ),
+                collection_type=metadata_dict.get("collection_type", "unknown"),
+                metadata_json=metadata_json,
+                metadata_hash=metadata_hash,
+            )
 
-                self.conn.commit()
-                metadata_id = cursor.lastrowid
+            session.add(new_metadata)
+            session.commit()
+            metadata_id = new_metadata.metadata_id
 
-                logger.info(f"Stored metadata {metadata_id} for session {session_id}")
-                return metadata_id
-            except sqlite3.Error as exc:
-                msg = f"Failed to store metadata: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+            logger.info(f"Stored metadata {metadata_id} for session {session_id}")
+            return metadata_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to store metadata: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def get_metadata(self, metadata_id: int) -> Optional[Dict[str, Any]]:
         """Get metadata by ID.
@@ -892,27 +773,25 @@ class StateManager:
         Returns:
             Metadata dictionary or None if not found
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = select(Metadata).where(Metadata.metadata_id == metadata_id)
+            result = session.execute(stmt).scalar_one_or_none()
 
-        with self.db_lock:
-            cursor = self.conn.execute(
-                "SELECT * FROM metadata WHERE metadata_id = ?", (metadata_id,)
-            )
-
-            row = cursor.fetchone()
-            if not row:
+            if not result:
                 return None
 
             return {
-                "metadata_id": row["metadata_id"],
-                "session_id": row["session_id"],
-                "iteration_id": row["iteration_id"],
-                "collection_time": row["collection_time"],
-                "collection_type": row["collection_type"],
-                "metadata": json.loads(row["metadata_json"]),
-                "metadata_hash": row["metadata_hash"],
+                "metadata_id": result.metadata_id,
+                "session_id": result.session_id,
+                "iteration_id": result.iteration_id,
+                "collection_time": result.collection_time,
+                "collection_type": result.collection_type,
+                "metadata": json.loads(result.metadata_json),
+                "metadata_hash": result.metadata_hash,
             }
+        finally:
+            session.close()
 
     def get_session_metadata(
         self, session_id: int, collection_type: Optional[str] = None
@@ -926,44 +805,33 @@ class StateManager:
         Returns:
             List of metadata dictionaries
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = (
+                select(Metadata)
+                .where(Metadata.session_id == session_id)
+                .order_by(Metadata.collection_time)
+            )
 
-        with self.db_lock:
             if collection_type:
-                cursor = self.conn.execute(
-                    """
-                    SELECT * FROM metadata
-                    WHERE session_id = ? AND collection_type = ?
-                    ORDER BY collection_time
-                    """,
-                    (session_id, collection_type),
-                )
-            else:
-                cursor = self.conn.execute(
-                    """
-                    SELECT * FROM metadata
-                    WHERE session_id = ?
-                    ORDER BY collection_time
-                    """,
-                    (session_id,),
-                )
+                stmt = stmt.where(Metadata.collection_type == collection_type)
 
-            results = []
-            for row in cursor.fetchall():
-                results.append(
-                    {
-                        "metadata_id": row["metadata_id"],
-                        "session_id": row["session_id"],
-                        "iteration_id": row["iteration_id"],
-                        "collection_time": row["collection_time"],
-                        "collection_type": row["collection_type"],
-                        "metadata": json.loads(row["metadata_json"]),
-                        "metadata_hash": row["metadata_hash"],
-                    }
-                )
+            results = session.execute(stmt).scalars().all()
 
-            return results
+            return [
+                {
+                    "metadata_id": meta.metadata_id,
+                    "session_id": meta.session_id,
+                    "iteration_id": meta.iteration_id,
+                    "collection_time": meta.collection_time,
+                    "collection_type": meta.collection_type,
+                    "metadata": json.loads(meta.metadata_json),
+                    "metadata_hash": meta.metadata_hash,
+                }
+                for meta in results
+            ]
+        finally:
+            session.close()
 
     def get_baseline_metadata(self, session_id: int) -> Optional[Dict[str, Any]]:
         """Get baseline metadata for a session.
@@ -994,39 +862,41 @@ class StateManager:
         Raises:
             DatabaseError: If file storage fails
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            # Calculate file hash and size
+            file_hash = None
+            file_size = 0
 
-        # Calculate file hash and size
-        file_hash = None
-        file_size = 0
+            path = Path(file_path)
+            if path.exists():
+                with path.open("rb") as f:
+                    content = f.read()
+                    file_hash = hashlib.sha256(content).hexdigest()
+                    file_size = len(content)
 
-        path = Path(file_path)
-        if path.exists():
-            with path.open("rb") as f:
-                content = f.read()
-                file_hash = hashlib.sha256(content).hexdigest()
-                file_size = len(content)
+            new_file = MetadataFile(
+                metadata_id=metadata_id,
+                file_type=file_type,
+                file_path=file_path,
+                file_hash=file_hash,
+                file_size=file_size,
+                compressed=compressed,
+            )
 
-        with self.db_lock:
-            cursor = self.conn.cursor()
-            try:
-                cursor.execute(
-                    """
-                    INSERT INTO metadata_files (
-                        metadata_id, file_type, file_path,
-                        file_hash, file_size, compressed
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (metadata_id, file_type, file_path, file_hash, file_size, compressed),
-                )
+            session.add(new_file)
+            session.commit()
+            file_id = new_file.file_id
 
-                self.conn.commit()
-                return cursor.lastrowid
-            except sqlite3.Error as exc:
-                msg = f"Failed to store metadata file: {exc}"
-                logger.error(msg)
-                raise DatabaseError(msg) from exc
+            return file_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to store metadata file: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
 
     def get_metadata_files(self, metadata_id: int) -> List[Dict[str, Any]]:
         """Get all files associated with metadata.
@@ -1037,19 +907,25 @@ class StateManager:
         Returns:
             List of file dictionaries
         """
-        if not self.conn:
-            raise DatabaseError("Database not initialized")
+        session = self.Session()
+        try:
+            stmt = select(MetadataFile).where(MetadataFile.metadata_id == metadata_id)
+            results = session.execute(stmt).scalars().all()
 
-        with self.db_lock:
-            cursor = self.conn.execute(
-                """
-                SELECT * FROM metadata_files
-                WHERE metadata_id = ?
-                """,
-                (metadata_id,),
-            )
-
-            return [dict(row) for row in cursor.fetchall()]
+            return [
+                {
+                    "file_id": file.file_id,
+                    "metadata_id": file.metadata_id,
+                    "file_type": file.file_type,
+                    "file_path": file.file_path,
+                    "file_hash": file.file_hash,
+                    "file_size": file.file_size,
+                    "compressed": file.compressed,
+                }
+                for file in results
+            ]
+        finally:
+            session.close()
 
     def generate_summary(self, session_id: int) -> Dict[str, Any]:
         """Generate summary of bisection session.
@@ -1060,8 +936,8 @@ class StateManager:
         Returns:
             Summary dictionary
         """
-        session = self.get_session(session_id)
-        if not session:
+        session_data = self.get_session(session_id)
+        if not session_data:
             return {}
 
         iterations = self.get_iterations(session_id)
@@ -1080,12 +956,12 @@ class StateManager:
 
         return {
             "session_id": session_id,
-            "good_commit": session.good_commit,
-            "bad_commit": session.bad_commit,
-            "start_time": session.start_time,
-            "end_time": session.end_time,
-            "status": session.status,
-            "result_commit": session.result_commit,
+            "good_commit": session_data.good_commit,
+            "bad_commit": session_data.bad_commit,
+            "start_time": session_data.start_time,
+            "end_time": session_data.end_time,
+            "status": session_data.status,
+            "result_commit": session_data.result_commit,
             "total_iterations": len(iterations),
             "results": results,
             "total_duration_seconds": total_duration,
@@ -1149,14 +1025,15 @@ class StateManager:
         return ""
 
     def close(self) -> None:
-        """Close database connection."""
-        with self.db_lock:
-            if self.conn:
-                try:
-                    self.conn.close()
-                    self.conn = None
-                except sqlite3.Error as exc:
-                    logger.error(f"Error closing database connection: {exc}")
+        """Close database connection and cleanup."""
+        try:
+            # Remove scoped session
+            self.Session.remove()
+            # Dispose of engine connection pool
+            self.engine.dispose()
+            logger.debug("Database connections closed")
+        except Exception as exc:
+            logger.error(f"Error closing database: {exc}")
 
 
 def main() -> int:
