@@ -1,0 +1,96 @@
+# Kernel Bisection Configuration
+# Copy this file to bisect.yaml in your bisection directory and customize
+#
+# Per-Directory Workflow:
+# Each bisection case should have its own directory with:
+#   - bisect.yaml (this config file)
+#   - bisect.db (database, created automatically)
+#
+# Example:
+#   mkdir ~/bisect-boot-issue
+#   cd ~/bisect-boot-issue
+#   cp /path/to/bisect.conf.example ./bisect.yaml
+#   vim bisect.yaml  # customize
+#   kbisect init v6.1 v6.6
+
+# Slave machine configuration
+slave:
+  hostname: 192.168.1.100           # Slave machine IP or hostname
+  ssh_user: root                     # SSH user for slave access
+  kernel_path: /root/kernel          # Path to kernel source on slave
+  bisect_path: /root/kernel-bisect/lib  # Path where bisect library will be deployed
+
+# Deployment configuration (automatic slave setup)
+deployment:
+  auto_deploy: true                  # Automatically deploy to slave if not set up
+  verify_before_bisect: true         # Verify slave setup before starting bisection
+  auto_update: false                 # Auto-update scripts on slave before each run
+  rsync_options: "-avz --delete"     # Rsync options for deployment
+
+# IPMI configuration (for power control and recovery)
+ipmi:
+  host: 192.168.1.101               # IPMI interface IP
+  username: admin                    # IPMI username
+  password: changeme                 # IPMI password (use keyring in production)
+
+# Timeouts (in seconds)
+timeouts:
+  boot: 300                          # Boot timeout
+  test: 600                          # Test timeout
+  build: 1800                        # Build timeout (30 minutes)
+
+# Disk space management
+disk_management:
+  boot_min_free_mb: 500             # Minimum free space in /boot before cleanup
+  boot_emergency_mb: 100            # Emergency cleanup threshold
+  keep_test_kernels: 2              # Number of test kernels to keep
+
+# Kernel configuration
+kernel_config:
+  # Path to base .config file (optional)
+  # If not specified and use_running_config is false, kernel defaults are used
+  config_file: null
+
+  # Use running kernel's config as base (default: false)
+  # If both config_file and use_running_config are set, config_file takes precedence
+  use_running_config: false
+
+# Kernel protection
+protection:
+  auto_lock_current_kernel: true    # Lock current kernel at init
+  verify_protected_after_cleanup: true  # Verify protection after cleanup
+
+# Test configuration
+tests:
+  - type: boot                      # Boot success test (always runs)
+
+  - type: custom                    # Custom test script
+    path: /root/kernel_build_and_install/reproducers/my-test.sh
+    enabled: false
+
+# Cleanup strategy
+cleanup:
+  mode: aggressive                  # aggressive | conservative
+  only_delete_bisect_tagged: true  # Only delete kernels tagged with -bisect-
+  verify_before_delete: true       # Triple-check before deletion
+
+# State and Database (per-directory isolation)
+# Default: files stored in current working directory
+database_path: bisect.db            # SQLite database file (default: ./bisect.db)
+state_dir: .                        # Directory for metadata/configs (default: current directory)
+
+# Metadata collection
+metadata:
+  collect_baseline: true            # Collect system metadata at session start
+  collect_per_iteration: true       # Collect kernel metadata per iteration
+  collect_kernel_config: true       # Include kernel .config in metadata
+  collect_packages: true            # Include rpm -qa / dpkg -l
+  compress_large_data: true         # Gzip large metadata files
+  # Note: Metadata is stored in state_dir (default: current directory)
+
+# Logging
+logging:
+  level: INFO                       # DEBUG | INFO | WARNING | ERROR
+  file: bisect.log                  # Log file (default: ./bisect.log in current directory)
+  max_size_mb: 100
+  backup_count: 5
