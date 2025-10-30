@@ -52,14 +52,14 @@ Given a "good" kernel version (works) and a "bad" kernel version (broken), this 
 **5-Minute Setup:**
 
 ```bash
-# 1. On master: Clone and setup tool
-cd /opt
-git clone <this-repo> kernel-bisect
-cd kernel-bisect/kernel-bisect
-sudo ln -s $(pwd)/kbisect /usr/local/bin/kbisect
+# 1. On master: Install system dependencies
+sudo dnf install python3 python3-pip ipmitool git  # or apt-get on Debian/Ubuntu
 
-# 2. Install dependencies
-sudo dnf install python3 python3-pyyaml ipmitool  # or apt-get
+# 2. Clone and install kbisect
+cd ~/projects
+git clone <this-repo> kbisect
+cd kbisect
+pip install .  # or: pipx install . / pip install --user .
 
 # 3. Setup SSH keys (passwordless access to slave)
 ssh-keygen -t ed25519
@@ -74,8 +74,8 @@ exit
 mkdir ~/bisect-boot-issue
 cd ~/bisect-boot-issue
 
-# 6. Create config for this bisection
-cp /opt/kernel-bisect/kernel-bisect/config/bisect.conf.example ./bisect.yaml
+# 6. Create config for this bisection (copy from installed package)
+python3 -c "import kbisect; from pathlib import Path; import shutil; src = Path(kbisect.__file__).parent / 'config' / 'bisect.conf.example'; shutil.copy(src, 'bisect.yaml')"
 vim bisect.yaml
 # Edit: Set slave hostname, IPMI credentials
 
@@ -134,14 +134,14 @@ That's it! The tool will now bisect automatically. Check progress with `kbisect 
 
 The master machine runs the `kbisect` CLI tool and orchestrates the bisection.
 
-**1. Install dependencies:**
+**1. Install system dependencies:**
 
 ```bash
 # RHEL/Fedora/Rocky
-sudo dnf install python3 python3-pyyaml ipmitool
+sudo dnf install python3 python3-pip ipmitool git
 
 # Debian/Ubuntu
-sudo apt-get install python3 python3-yaml ipmitool
+sudo apt-get install python3 python3-pip ipmitool git
 
 # Verify Python 3.8+
 python3 --version
@@ -150,20 +150,43 @@ python3 --version
 **2. Clone repository:**
 
 ```bash
-sudo mkdir -p /opt
-cd /opt
-git clone <repository-url> kernel-bisect
-cd kernel-bisect/kernel-bisect
+# Clone to your preferred location
+cd ~/projects  # or /opt, or anywhere you prefer
+git clone <repository-url> kbisect
+cd kbisect
 ```
 
-**3. Install CLI tool:**
+**3. Install kbisect via pip:**
+
+Choose one of the following installation methods:
 
 ```bash
-sudo ln -s $(pwd)/kbisect /usr/local/bin/kbisect
-chmod +x kbisect
+# Option A: Regular installation (recommended for users)
+pip install .
+
+# Option B: Development installation (for contributors)
+# This creates a symlink, so code changes are immediately active
+pip install -e .
+
+# Option C: With development tools (ruff, mypy, pytest)
+pip install -e ".[dev]"
 
 # Verify installation
 kbisect --help
+```
+
+**Note:** If you get a "externally managed environment" error, use one of these approaches:
+```bash
+# Approach 1: Use pipx (recommended for CLI tools)
+pipx install .
+
+# Approach 2: Use a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+pip install .
+
+# Approach 3: User installation (no sudo needed)
+pip install --user .
 ```
 
 **4. Setup SSH keys:**
@@ -188,8 +211,13 @@ Each bisection case gets its own directory with its own config file:
 mkdir ~/my-bisection
 cd ~/my-bisection
 
-# Copy and customize config
-cp /opt/kernel-bisect/kernel-bisect/config/bisect.conf.example ./bisect.yaml
+# Copy and customize config from the installed package
+python3 -c "import kbisect; from pathlib import Path; import shutil; src = Path(kbisect.__file__).parent / 'config' / 'bisect.conf.example'; shutil.copy(src, 'bisect.yaml')"
+
+# Or manually copy from the cloned repository
+cp ~/projects/kbisect/src/kbisect/config/bisect.conf.example ./bisect.yaml
+
+# Edit the config
 vim bisect.yaml
 ```
 
@@ -1217,14 +1245,131 @@ A: Yes - create a custom test script that tests your specific issue.
 
 ---
 
-## Contributing
+## Development
+
+### Setting Up Development Environment
+
+```bash
+# Clone the repository
+git clone <repository-url> kbisect
+cd kbisect
+
+# Install in development mode with dev dependencies
+pip install -e ".[dev]"
+
+# This installs:
+# - kbisect (editable, changes take effect immediately)
+# - ruff (linter and formatter)
+# - mypy (type checker)
+# - pytest (testing framework)
+```
+
+### Development Workflow
+
+**Linting and Formatting:**
+```bash
+# Check code quality
+ruff check src/
+
+# Auto-fix issues
+ruff check src/ --fix
+
+# Format code
+ruff format src/
+
+# Run type checking
+mypy src/
+```
+
+**Testing:**
+```bash
+# Run tests (when available)
+pytest
+
+# Run with coverage
+pytest --cov=kbisect --cov-report=html
+```
+
+**Building:**
+```bash
+# Build distribution packages
+pip install build
+python -m build
+
+# This creates:
+# - dist/kbisect-X.Y.Z-py3-none-any.whl
+# - dist/kbisect-X.Y.Z.tar.gz
+```
+
+**Versioning:**
+The project uses `hatch-vcs` to automatically derive versions from git tags:
+```bash
+# Create a new version tag
+git tag v0.2.0
+git push --tags
+
+# Version is automatically updated in builds
+python -c "import kbisect; print(kbisect.__version__)"
+```
+
+### Project Structure
+
+```
+kbisect/
+├── pyproject.toml              # Project metadata, dependencies, tool configs
+├── README.md                   # This file
+├── .gitignore                 # Git ignore patterns
+├── src/kbisect/               # Source code (src layout)
+│   ├── __init__.py
+│   ├── cli.py                 # CLI entry point
+│   ├── master/                # Master controller modules
+│   │   ├── bisect_master.py   # Main bisection logic
+│   │   ├── state_manager.py   # SQLite state management
+│   │   ├── slave_monitor.py   # Health monitoring
+│   │   ├── ipmi_controller.py # IPMI power control
+│   │   └── slave_deployer.py  # Automatic deployment
+│   ├── lib/                   # Bash library (deployed to slave)
+│   │   └── bisect-functions.sh
+│   └── config/                # Configuration templates
+│       └── bisect.conf.example
+└── tests/                     # Test suite (pytest)
+```
+
+### Code Style
+
+This project uses modern Python best practices:
+
+- **Type hints**: All functions have type annotations (Python 3.8+ compatible)
+- **Docstrings**: Google-style docstrings for all public APIs
+- **Formatting**: Ruff (replaces black, flake8, isort)
+- **Line length**: 100 characters
+- **Imports**: Sorted and organized (stdlib → third-party → local)
+- **Constants**: UPPER_CASE module-level constants
+- **Exceptions**: Custom exception classes for better error handling
+
+### Contributing
 
 Contributions welcome! Please:
 
-1. Test your changes thoroughly
-2. Update documentation
-3. Follow existing code style
-4. Add examples for new features
+1. **Fork and create a branch**: `git checkout -b feature/your-feature`
+2. **Make your changes**: Follow the code style above
+3. **Run linters**: `ruff check src/ --fix && ruff format src/`
+4. **Run type checker**: `mypy src/`
+5. **Test your changes**: Add tests if applicable
+6. **Update documentation**: Update README if needed
+7. **Commit**: Use clear, descriptive commit messages
+8. **Push and create PR**: Describe your changes clearly
+
+**Before submitting:**
+```bash
+# Ensure code quality
+ruff check src/ --fix
+ruff format src/
+mypy src/
+
+# Run tests
+pytest
+```
 
 ---
 

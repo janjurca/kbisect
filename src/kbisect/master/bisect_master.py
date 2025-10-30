@@ -1,35 +1,37 @@
 #!/usr/bin/env python3
-"""
-Master Bisection Controller
-Orchestrates the kernel bisection process across master and slave machines
+"""Master Bisection Controller.
+
+Orchestrates the kernel bisection process across master and slave machines.
 """
 
-import os
-import sys
-import subprocess
-import time
 import json
 import logging
-from pathlib import Path
-from typing import Optional, Dict, Any, List
-from dataclasses import dataclass, asdict
+import subprocess
+import sys
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
+from typing import List, Optional, Tuple
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler('/var/log/kernel-bisect-master.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+
 logger = logging.getLogger(__name__)
+
+# Constants
+DEFAULT_BOOT_TIMEOUT = 300
+DEFAULT_TEST_TIMEOUT = 600
+DEFAULT_BUILD_TIMEOUT = 1800
+DEFAULT_REBOOT_SETTLE_TIME = 10
+DEFAULT_POST_BOOT_SETTLE_TIME = 10
+LOG_FILE_PATH = "/var/log/kernel-bisect-master.log"
+COMMIT_HASH_LENGTH = 40
+SHORT_COMMIT_LENGTH = 7
 
 
 class BisectState(Enum):
-    """Bisection state"""
+    """Bisection state."""
+
     IDLE = "idle"
     BUILDING = "building"
     REBOOTING = "rebooting"
@@ -40,7 +42,8 @@ class BisectState(Enum):
 
 
 class TestResult(Enum):
-    """Test result"""
+    """Test result."""
+
     GOOD = "good"
     BAD = "bad"
     SKIP = "skip"
@@ -49,7 +52,30 @@ class TestResult(Enum):
 
 @dataclass
 class BisectConfig:
-    """Bisection configuration"""
+    """Bisection configuration.
+
+    Attributes:
+        slave_host: Slave machine hostname or IP
+        slave_user: SSH username for slave
+        slave_kernel_path: Path to kernel source on slave
+        slave_bisect_path: Path to bisect library on slave
+        ipmi_host: IPMI interface hostname or IP (optional)
+        ipmi_user: IPMI username (optional)
+        ipmi_password: IPMI password (optional)
+        boot_timeout: Boot timeout in seconds
+        test_timeout: Test timeout in seconds
+        build_timeout: Build timeout in seconds
+        test_type: Test type (boot or custom)
+        test_script: Path to custom test script (optional)
+        state_dir: Directory for state/metadata storage
+        db_path: Path to SQLite database
+        kernel_config_file: Path to kernel config file (optional)
+        use_running_config: Use running kernel config as base
+        collect_baseline: Collect baseline system metadata
+        collect_per_iteration: Collect metadata per iteration
+        collect_kernel_config: Collect kernel .config files
+    """
+
     slave_host: str
     slave_user: str = "root"
     slave_kernel_path: str = "/root/kernel"
@@ -57,13 +83,13 @@ class BisectConfig:
     ipmi_host: Optional[str] = None
     ipmi_user: Optional[str] = None
     ipmi_password: Optional[str] = None
-    boot_timeout: int = 300  # seconds
-    test_timeout: int = 600  # seconds
-    build_timeout: int = 1800  # seconds
+    boot_timeout: int = DEFAULT_BOOT_TIMEOUT
+    test_timeout: int = DEFAULT_TEST_TIMEOUT
+    build_timeout: int = DEFAULT_BUILD_TIMEOUT
     test_type: str = "boot"
     test_script: Optional[str] = None
-    state_dir: str = "."  # Per-directory: metadata/configs in current directory
-    db_path: str = "bisect.db"  # Per-directory: database in current directory
+    state_dir: str = "."
+    db_path: str = "bisect.db"
     kernel_config_file: Optional[str] = None
     use_running_config: bool = False
     collect_baseline: bool = True
@@ -73,7 +99,21 @@ class BisectConfig:
 
 @dataclass
 class BisectIteration:
-    """Single bisection iteration"""
+    """Single bisection iteration.
+
+    Attributes:
+        iteration: Iteration number
+        commit_sha: Full commit SHA
+        commit_short: Short commit SHA
+        commit_message: Commit message
+        state: Current bisection state
+        result: Test result (None until complete)
+        start_time: ISO timestamp of iteration start
+        end_time: ISO timestamp of iteration end
+        duration: Duration in seconds
+        error: Error message if iteration failed
+    """
+
     iteration: int
     commit_sha: str
     commit_short: str
@@ -87,46 +127,76 @@ class BisectIteration:
 
 
 class SSHClient:
-    """SSH client for slave communication"""
+    """SSH client for slave communication.
 
-    def __init__(self, host: str, user: str = "root"):
+    Provides methods to execute commands on slave via SSH and copy files.
+
+    Attributes:
+        host: Slave hostname or IP
+        user: SSH username
+    """
+
+    def __init__(self, host: str, user: str = "root") -> None:
+        """Initialize SSH client.
+
+        Args:
+            host: Slave hostname or IP
+            user: SSH username
+        """
         self.host = host
         self.user = user
 
-    def run_command(self, command: str, timeout: Optional[int] = None) -> tuple[int, str, str]:
-        """Run command on slave via SSH"""
+    def run_command(
+        self, command: str, timeout: Optional[int] = None
+    ) -> Tuple[int, str, str]:
+        """Run command on slave via SSH.
+
+        Args:
+            command: Command to execute
+            timeout: Command timeout in seconds
+
+        Returns:
+            Tuple of (return_code, stdout, stderr)
+        """
         ssh_command = [
             "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "ConnectTimeout=10",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "ConnectTimeout=10",
             f"{self.user}@{self.host}",
-            command
+            command,
         ]
 
         try:
             result = subprocess.run(
-                ssh_command,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                ssh_command, capture_output=True, text=True, timeout=timeout, check=False
             )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
             logger.error(f"SSH command timed out after {timeout}s")
             return -1, "", "Timeout"
-        except Exception as e:
-            logger.error(f"SSH command failed: {e}")
-            return -1, "", str(e)
+        except Exception as exc:
+            logger.error(f"SSH command failed: {exc}")
+            return -1, "", str(exc)
 
     def is_alive(self) -> bool:
-        """Check if slave is reachable"""
+        """Check if slave is reachable.
+
+        Returns:
+            True if slave responds to SSH, False otherwise
+        """
         ret, _, _ = self.run_command("echo alive", timeout=5)
         return ret == 0
 
-    def call_function(self, function_name: str, *args,
-                     library_path: str = "/root/kernel-bisect/lib/bisect-functions.sh",
-                     timeout: Optional[int] = None) -> tuple[int, str, str]:
-        """Call a bash function from the bisect library
+    def call_function(
+        self,
+        function_name: str,
+        *args: str,
+        library_path: str = "/root/kernel-bisect/lib/bisect-functions.sh",
+        timeout: Optional[int] = None,
+    ) -> Tuple[int, str, str]:
+        """Call a bash function from the bisect library.
 
         Args:
             function_name: Name of the bash function to call
@@ -138,34 +208,66 @@ class SSHClient:
             Tuple of (return_code, stdout, stderr)
         """
         # Escape and quote arguments
-        args_str = ' '.join(f'"{arg}"' for arg in args)
+        args_str = " ".join(f'"{arg}"' for arg in args)
 
         # Source library and call function
-        command = f'source {library_path} && {function_name} {args_str}'
+        command = f"source {library_path} && {function_name} {args_str}"
 
         return self.run_command(command, timeout=timeout)
 
     def copy_file(self, local_path: str, remote_path: str) -> bool:
-        """Copy file to slave"""
+        """Copy file to slave.
+
+        Args:
+            local_path: Local file path
+            remote_path: Remote destination path
+
+        Returns:
+            True if copy succeeded, False otherwise
+        """
         scp_command = [
             "scp",
-            "-o", "StrictHostKeyChecking=no",
+            "-o",
+            "StrictHostKeyChecking=no",
             local_path,
-            f"{self.user}@{self.host}:{remote_path}"
+            f"{self.user}@{self.host}:{remote_path}",
         ]
 
         try:
-            result = subprocess.run(scp_command, capture_output=True, text=True)
+            result = subprocess.run(scp_command, capture_output=True, text=True, check=False)
             return result.returncode == 0
-        except Exception as e:
-            logger.error(f"SCP failed: {e}")
+        except Exception as exc:
+            logger.error(f"SCP failed: {exc}")
             return False
 
 
 class BisectMaster:
-    """Main bisection controller"""
+    """Main bisection controller.
 
-    def __init__(self, config: BisectConfig, good_commit: str, bad_commit: str):
+    Orchestrates the kernel bisection process including building kernels,
+    rebooting systems, running tests, and managing state.
+
+    Attributes:
+        config: Bisection configuration
+        good_commit: Known good commit
+        bad_commit: Known bad commit
+        ssh: SSH client for slave communication
+        state_file: Path to state JSON file
+        iterations: List of completed iterations
+        current_iteration: Currently executing iteration
+        iteration_count: Total iteration count
+        session_id: Database session ID
+        state: State manager instance
+    """
+
+    def __init__(self, config: BisectConfig, good_commit: str, bad_commit: str) -> None:
+        """Initialize bisection master.
+
+        Args:
+            config: Bisection configuration
+            good_commit: Known good commit hash
+            bad_commit: Known bad commit hash
+        """
         self.config = config
         self.good_commit = good_commit
         self.bad_commit = bad_commit
@@ -179,7 +281,8 @@ class BisectMaster:
         Path(config.state_dir).mkdir(parents=True, exist_ok=True)
 
         # Initialize state manager and create/load session
-        from state_manager import StateManager
+        from kbisect.master.state_manager import StateManager
+
         self.state = StateManager(db_path=config.db_path)
 
         # Check for existing running session or create new one
@@ -191,16 +294,23 @@ class BisectMaster:
             self.session_id = self.state.create_session(good_commit, bad_commit)
             logger.debug(f"Created new session {self.session_id}")
 
-    def collect_and_store_metadata(self, collection_type: str,
-                                   iteration_id: Optional[int] = None) -> bool:
-        """Collect metadata from slave and store in database"""
+    def collect_and_store_metadata(
+        self, collection_type: str, iteration_id: Optional[int] = None
+    ) -> bool:
+        """Collect metadata from slave and store in database.
+
+        Args:
+            collection_type: Type of metadata to collect
+            iteration_id: Optional iteration ID
+
+        Returns:
+            True if metadata collected successfully, False otherwise
+        """
         logger.debug(f"Collecting {collection_type} metadata...")
 
         # Call bash function to collect metadata
         ret, stdout, stderr = self.ssh.call_function(
-            "collect_metadata",
-            collection_type,
-            timeout=30
+            "collect_metadata", collection_type, timeout=30
         )
 
         if ret != 0:
@@ -210,8 +320,8 @@ class BisectMaster:
         # Parse JSON response
         try:
             metadata_dict = json.loads(stdout)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Invalid JSON from metadata collection: {e}")
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Invalid JSON from metadata collection: {exc}")
             logger.debug(f"Raw output: {stdout}")
             return False
 
@@ -222,7 +332,15 @@ class BisectMaster:
         return True
 
     def capture_kernel_config(self, kernel_version: str, iteration_id: int) -> bool:
-        """Capture and store kernel config file from slave"""
+        """Capture and store kernel config file from slave.
+
+        Args:
+            kernel_version: Kernel version string
+            iteration_id: Iteration ID for linking config file
+
+        Returns:
+            True if config captured successfully, False otherwise
+        """
         config_path = f"/boot/config-{kernel_version}"
 
         # Create local storage directory
@@ -233,36 +351,35 @@ class BisectMaster:
         # Download config file from slave using scp
         scp_cmd = [
             "scp",
-            "-o", "StrictHostKeyChecking=no",
+            "-o",
+            "StrictHostKeyChecking=no",
             f"{self.config.slave_user}@{self.config.slave_host}:{config_path}",
-            str(local_config_path)
+            str(local_config_path),
         ]
 
         try:
-            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30, check=False)
             if result.returncode != 0:
                 logger.warning(f"Failed to download kernel config: {result.stderr}")
                 return False
         except subprocess.TimeoutExpired:
             logger.warning("Kernel config download timed out")
             return False
-        except Exception as e:
-            logger.warning(f"Error downloading kernel config: {e}")
+        except Exception as exc:
+            logger.warning(f"Error downloading kernel config: {exc}")
             return False
 
         # Store reference in database
-        # Get metadata for this iteration to link the config file
-        metadata_list = self.state.get_session_metadata(self.session_id, 'iteration')
+        metadata_list = self.state.get_session_metadata(self.session_id, "iteration")
         if metadata_list:
             # Find metadata for this iteration
-            iteration_metadata = [m for m in metadata_list if m.get('iteration_id') == iteration_id]
+            iteration_metadata = [
+                m for m in metadata_list if m.get("iteration_id") == iteration_id
+            ]
             if iteration_metadata:
-                metadata_id = iteration_metadata[0]['metadata_id']
+                metadata_id = iteration_metadata[0]["metadata_id"]
                 self.state.store_metadata_file(
-                    metadata_id,
-                    "kernel_config",
-                    str(local_config_path),
-                    compressed=False
+                    metadata_id, "kernel_config", str(local_config_path), compressed=False
                 )
                 logger.info(f"✓ Captured kernel config: {config_path}")
                 return True
@@ -271,7 +388,11 @@ class BisectMaster:
         return False
 
     def initialize(self) -> bool:
-        """Initialize bisection"""
+        """Initialize bisection.
+
+        Returns:
+            True if initialization successful, False otherwise
+        """
         logger.info("=== Initializing Kernel Bisection ===")
         logger.info(f"Good commit: {self.good_commit}")
         logger.info(f"Bad commit: {self.bad_commit}")
@@ -303,21 +424,16 @@ class BisectMaster:
             else:
                 logger.warning("Failed to collect baseline metadata (non-fatal)")
 
-        # Start git bisect
-        logger.info("Starting git bisect...")
-        # Note: This would normally be done on the slave's kernel source
-        # For now, we'll manage bisect state ourselves
-
         self.save_state()
         logger.info("=== Initialization Complete ===")
         return True
 
     def get_next_commit(self) -> Optional[str]:
-        """Get next commit to test using git bisect"""
-        # This is a simplified implementation
-        # In practice, you'd run git bisect on the kernel source
+        """Get next commit to test using git bisect.
 
-        # For now, we'll use git bisect commands via SSH on the slave
+        Returns:
+            Commit SHA or None if bisection complete
+        """
         ret, stdout, stderr = self.ssh.run_command(
             f"cd {self.config.slave_kernel_path} && "
             f"git bisect start {self.bad_commit} {self.good_commit} 2>&1 || "
@@ -329,17 +445,24 @@ class BisectMaster:
             return None
 
         commit = stdout.strip()
-        if not commit or len(commit) != 40:
+        if not commit or len(commit) != COMMIT_HASH_LENGTH:
             logger.error(f"Invalid commit hash: {commit}")
             return None
 
         return commit
 
     def build_kernel(self, commit_sha: str) -> bool:
-        """Build kernel on slave"""
-        logger.info(f"Building kernel for commit {commit_sha[:7]}...")
+        """Build kernel on slave.
 
-        # Determine kernel config source (CLI arg > config file > running > none)
+        Args:
+            commit_sha: Commit SHA to build
+
+        Returns:
+            True if build successful, False otherwise
+        """
+        logger.info(f"Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}...")
+
+        # Determine kernel config source
         kernel_config = ""
         if self.config.kernel_config_file:
             kernel_config = self.config.kernel_config_file
@@ -354,7 +477,7 @@ class BisectMaster:
             commit_sha,
             self.config.slave_kernel_path,
             kernel_config,
-            timeout=self.config.build_timeout
+            timeout=self.config.build_timeout,
         )
 
         if ret != 0:
@@ -366,15 +489,19 @@ class BisectMaster:
         logger.debug(f"Kernel version: {stdout.strip()}")
         return True
 
-    def reboot_slave(self) -> tuple[bool, Optional[str]]:
-        """Reboot slave machine and return (success, booted_kernel_version)"""
+    def reboot_slave(self) -> Tuple[bool, Optional[str]]:
+        """Reboot slave machine and return (success, booted_kernel_version).
+
+        Returns:
+            Tuple of (success, booted_kernel_version)
+        """
         logger.info("Rebooting slave...")
 
         # Send reboot command
         self.ssh.run_command("reboot", timeout=5)
 
         # Wait a bit for reboot to start
-        time.sleep(10)
+        time.sleep(DEFAULT_REBOOT_SETTLE_TIME)
 
         # Wait for slave to come back up
         logger.info("Waiting for slave to reboot...")
@@ -388,70 +515,82 @@ class BisectMaster:
             if self.ssh.is_alive():
                 logger.info(f"✓ Slave is back online after {waited}s")
                 # Give it a bit more time to fully boot
-                time.sleep(10)
+                time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
 
                 # Get kernel version that booted
                 ret, kernel_ver, _ = self.ssh.call_function("get_kernel_version")
                 if ret == 0 and kernel_ver.strip():
                     return (True, kernel_ver.strip())
-                else:
-                    logger.warning("Could not determine booted kernel version")
-                    return (True, None)
+
+                logger.warning("Could not determine booted kernel version")
+                return (True, None)
 
             if waited % 30 == 0:
                 logger.info(f"Still waiting... ({waited}/{max_wait}s)")
 
         # Timeout! Try IPMI recovery if configured
         logger.error("Slave failed to reboot within timeout")
+        return self._try_ipmi_recovery()
 
-        if self.config.ipmi_host:
-            logger.warning("Attempting IPMI power cycle for recovery...")
-            try:
-                from ipmi_controller import IPMIController
-                ipmi = IPMIController(
-                    self.config.ipmi_host,
-                    self.config.ipmi_user,
-                    self.config.ipmi_password
-                )
+    def _try_ipmi_recovery(self) -> Tuple[bool, Optional[str]]:
+        """Try to recover slave using IPMI.
 
-                # Force power cycle
-                ipmi.power_cycle()
-                logger.info("IPMI power cycle initiated, waiting for system to boot...")
-
-                # Wait again for slave to come back (should boot protected kernel)
-                time.sleep(10)
-                ipmi_wait = 0
-                ipmi_max_wait = self.config.boot_timeout
-
-                while ipmi_wait < ipmi_max_wait:
-                    time.sleep(5)
-                    ipmi_wait += 5
-
-                    if self.ssh.is_alive():
-                        logger.info(f"✓ Slave recovered via IPMI after {ipmi_wait}s")
-                        time.sleep(10)
-
-                        # Get kernel version
-                        ret, kernel_ver, _ = self.ssh.call_function("get_kernel_version")
-                        if ret == 0 and kernel_ver.strip():
-                            logger.info(f"Booted into kernel: {kernel_ver.strip()}")
-                            return (True, kernel_ver.strip())
-                        else:
-                            return (True, None)
-
-                    if ipmi_wait % 30 == 0:
-                        logger.info(f"Still waiting after IPMI... ({ipmi_wait}/{ipmi_max_wait}s)")
-
-                logger.error("IPMI recovery failed - slave still not responding")
-            except Exception as e:
-                logger.error(f"IPMI recovery failed: {e}")
-        else:
+        Returns:
+            Tuple of (success, booted_kernel_version)
+        """
+        if not self.config.ipmi_host:
             logger.warning("IPMI not configured - cannot attempt automatic recovery")
+            return (False, None)
 
-        return (False, None)
+        logger.warning("Attempting IPMI power cycle for recovery...")
+        try:
+            from kbisect.master.ipmi_controller import IPMIController
+
+            ipmi = IPMIController(
+                self.config.ipmi_host, self.config.ipmi_user, self.config.ipmi_password
+            )
+
+            # Force power cycle
+            ipmi.power_cycle()
+            logger.info("IPMI power cycle initiated, waiting for system to boot...")
+
+            # Wait again for slave to come back
+            time.sleep(DEFAULT_REBOOT_SETTLE_TIME)
+            ipmi_wait = 0
+            ipmi_max_wait = self.config.boot_timeout
+
+            while ipmi_wait < ipmi_max_wait:
+                time.sleep(5)
+                ipmi_wait += 5
+
+                if self.ssh.is_alive():
+                    logger.info(f"✓ Slave recovered via IPMI after {ipmi_wait}s")
+                    time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
+
+                    # Get kernel version
+                    ret, kernel_ver, _ = self.ssh.call_function("get_kernel_version")
+                    if ret == 0 and kernel_ver.strip():
+                        logger.info(f"Booted into kernel: {kernel_ver.strip()}")
+                        return (True, kernel_ver.strip())
+
+                    return (True, None)
+
+                if ipmi_wait % 30 == 0:
+                    logger.info(f"Still waiting after IPMI... ({ipmi_wait}/{ipmi_max_wait}s)")
+
+            logger.error("IPMI recovery failed - slave still not responding")
+            return (False, None)
+
+        except Exception as exc:
+            logger.error(f"IPMI recovery failed: {exc}")
+            return (False, None)
 
     def run_tests(self) -> TestResult:
-        """Run tests on slave"""
+        """Run tests on slave.
+
+        Returns:
+            Test result (GOOD, BAD, SKIP, or UNKNOWN)
+        """
         logger.info("Running tests on slave...")
 
         # Call run_test function from library
@@ -460,13 +599,11 @@ class BisectMaster:
                 "run_test",
                 self.config.test_type,
                 self.config.test_script,
-                timeout=self.config.test_timeout
+                timeout=self.config.test_timeout,
             )
         else:
             ret, stdout, stderr = self.ssh.call_function(
-                "run_test",
-                self.config.test_type,
-                timeout=self.config.test_timeout
+                "run_test", self.config.test_type, timeout=self.config.test_timeout
             )
 
         logger.debug(f"Test output: {stdout}")
@@ -474,13 +611,21 @@ class BisectMaster:
         if ret == 0:
             logger.info("✓ Tests PASSED")
             return TestResult.GOOD
-        else:
-            logger.error("✗ Tests FAILED")
-            logger.debug(f"Test error: {stderr}")
-            return TestResult.BAD
+
+        logger.error("✗ Tests FAILED")
+        logger.debug(f"Test error: {stderr}")
+        return TestResult.BAD
 
     def mark_commit(self, commit_sha: str, result: TestResult) -> bool:
-        """Mark commit as good or bad in git bisect"""
+        """Mark commit as good or bad in git bisect.
+
+        Args:
+            commit_sha: Commit SHA to mark
+            result: Test result
+
+        Returns:
+            True if marking succeeded, False otherwise
+        """
         if result == TestResult.SKIP:
             bisect_cmd = "git bisect skip"
         elif result == TestResult.GOOD:
@@ -499,11 +644,75 @@ class BisectMaster:
             logger.error(f"Failed to mark commit: {stderr}")
             return False
 
-        logger.info(f"Marked commit {commit_sha[:7]} as {result.value}")
+        logger.info(f"Marked commit {commit_sha[:SHORT_COMMIT_LENGTH]} as {result.value}")
         return True
 
+    def _handle_boot_failure(
+        self,
+        iteration: BisectIteration,
+        iteration_id: int,
+        commit_sha: str,
+        expected_kernel_ver: Optional[str],
+        actual_kernel_ver: Optional[str],
+        is_timeout: bool = False,
+    ) -> None:
+        """Handle boot failure scenario.
+
+        Args:
+            iteration: Current iteration object
+            iteration_id: Iteration database ID
+            commit_sha: Commit SHA being tested
+            expected_kernel_ver: Expected kernel version
+            actual_kernel_ver: Actual kernel version that booted
+            is_timeout: Whether failure was due to timeout
+        """
+        if is_timeout:
+            logger.error("✗ Boot timeout or failure!")
+            logger.error(f"  Expected kernel: {expected_kernel_ver}")
+            logger.error("  Slave did not respond within timeout")
+        else:
+            logger.error("✗ Kernel panic detected!")
+            logger.error(f"  Expected: {expected_kernel_ver}")
+            logger.error(f"  Actual:   {actual_kernel_ver}")
+            logger.error("  Test kernel failed to boot, fell back to protected kernel")
+
+        # Determine result based on test type
+        if self.config.test_type == "boot" or not self.config.test_script:
+            # Boot test mode: non-bootable kernel is BAD
+            iteration.result = TestResult.BAD
+            iteration.error = (
+                "Boot timeout - kernel failed to boot"
+                if is_timeout
+                else "Kernel panic detected - kernel failed to boot"
+            )
+            logger.error("  Marking as BAD (boot test mode)")
+            self.mark_commit(commit_sha, TestResult.BAD)
+            self.state.update_iteration(
+                iteration_id, final_result="bad", error_message=iteration.error
+            )
+        else:
+            # Custom test mode: can't test functionality if kernel doesn't boot
+            iteration.result = TestResult.SKIP
+            iteration.error = (
+                "Boot timeout - cannot test functionality, skipping commit"
+                if is_timeout
+                else "Kernel panic detected - cannot test functionality, skipping commit"
+            )
+            logger.warning("  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)")
+            self.mark_commit(commit_sha, TestResult.SKIP)
+            self.state.update_iteration(
+                iteration_id, final_result="skip", error_message=iteration.error
+            )
+
     def run_iteration(self, commit_sha: str) -> BisectIteration:
-        """Run single bisection iteration"""
+        """Run single bisection iteration.
+
+        Args:
+            commit_sha: Commit SHA to test
+
+        Returns:
+            BisectIteration object with results
+        """
         self.iteration_count += 1
 
         # Get commit info
@@ -514,19 +723,16 @@ class BisectMaster:
 
         # Create iteration in database
         iteration_id = self.state.create_iteration(
-            self.session_id,
-            self.iteration_count,
-            commit_sha,
-            commit_msg
+            self.session_id, self.iteration_count, commit_sha, commit_msg
         )
 
         iteration = BisectIteration(
             iteration=self.iteration_count,
             commit_sha=commit_sha,
-            commit_short=commit_sha[:7],
+            commit_short=commit_sha[:SHORT_COMMIT_LENGTH],
             commit_message=commit_msg,
             state=BisectState.IDLE,
-            start_time=datetime.utcnow().isoformat()
+            start_time=datetime.utcnow().isoformat(),
         )
 
         self.current_iteration = iteration
@@ -543,19 +749,20 @@ class BisectMaster:
                 iteration.error = "Build failed"
                 logger.error("Build failed, skipping commit")
                 self.mark_commit(commit_sha, TestResult.SKIP)
-                self.state.update_iteration(iteration_id, final_result="skip", error_message="Build failed")
+                self.state.update_iteration(
+                    iteration_id, final_result="skip", error_message="Build failed"
+                )
                 return iteration
 
-            # Get kernel version that was just built (needed for boot verification)
+            # Get kernel version that was just built
             ret, kernel_version, _ = self.ssh.run_command(
                 f"cd {self.config.slave_kernel_path} && make kernelrelease"
             )
-            if ret == 0 and kernel_version.strip():
-                expected_kernel_ver = kernel_version.strip()
+            expected_kernel_ver = kernel_version.strip() if ret == 0 and kernel_version.strip() else None
+            if expected_kernel_ver:
                 logger.info(f"Built kernel version: {expected_kernel_ver}")
             else:
                 logger.warning("Could not determine kernel version")
-                expected_kernel_ver = None
 
             # Reboot slave
             iteration.state = BisectState.REBOOTING
@@ -564,59 +771,29 @@ class BisectMaster:
             reboot_success, actual_kernel_ver = self.reboot_slave()
 
             if not reboot_success:
-                # Boot timeout or complete failure - apply conditional marking
-                logger.error("✗ Boot timeout or failure!")
-                logger.error(f"  Expected kernel: {expected_kernel_ver}")
-                logger.error(f"  Slave did not respond within timeout")
-
-                if self.config.test_type == "boot" or not self.config.test_script:
-                    # Boot test mode: timeout is BAD (we're testing bootability)
-                    iteration.result = TestResult.BAD
-                    iteration.error = "Boot timeout - kernel failed to boot"
-                    logger.error(f"  Marking as BAD (boot test mode)")
-                    self.mark_commit(commit_sha, TestResult.BAD)
-                    self.state.update_iteration(iteration_id, final_result="bad", error_message=iteration.error)
-                else:
-                    # Custom test mode: can't test functionality if kernel doesn't boot
-                    iteration.result = TestResult.SKIP
-                    iteration.error = "Boot timeout - cannot test functionality, skipping commit"
-                    logger.warning(f"  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)")
-                    self.mark_commit(commit_sha, TestResult.SKIP)
-                    self.state.update_iteration(iteration_id, final_result="skip", error_message=iteration.error)
-
+                # Boot timeout or complete failure
+                self._handle_boot_failure(
+                    iteration, iteration_id, commit_sha, expected_kernel_ver, None, is_timeout=True
+                )
                 return iteration
 
-            # Verify which kernel actually booted (critical for detecting kernel panics)
+            # Verify which kernel actually booted
             if actual_kernel_ver:
                 logger.info(f"Booted kernel version: {actual_kernel_ver}")
 
-                # Compare expected vs actual kernel
                 if expected_kernel_ver and actual_kernel_ver != expected_kernel_ver:
                     # Kernel panic detected - system fell back to protected kernel
-                    # Decision: BAD or SKIP depends on test type
-                    logger.error(f"✗ Kernel panic detected!")
-                    logger.error(f"  Expected: {expected_kernel_ver}")
-                    logger.error(f"  Actual:   {actual_kernel_ver}")
-                    logger.error(f"  Test kernel failed to boot, fell back to protected kernel")
-
-                    if self.config.test_type == "boot" or not self.config.test_script:
-                        # Boot test mode: non-bootable kernel is BAD (this is what we're testing)
-                        iteration.result = TestResult.BAD
-                        iteration.error = f"Kernel panic detected - kernel failed to boot"
-                        logger.error(f"  Marking as BAD (boot test mode)")
-                        self.mark_commit(commit_sha, TestResult.BAD)
-                        self.state.update_iteration(iteration_id, final_result="bad", error_message=iteration.error)
-                    else:
-                        # Custom test mode: can't test functionality if kernel doesn't boot
-                        iteration.result = TestResult.SKIP
-                        iteration.error = f"Kernel panic detected - cannot test functionality, skipping commit"
-                        logger.warning(f"  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)")
-                        self.mark_commit(commit_sha, TestResult.SKIP)
-                        self.state.update_iteration(iteration_id, final_result="skip", error_message=iteration.error)
-
+                    self._handle_boot_failure(
+                        iteration,
+                        iteration_id,
+                        commit_sha,
+                        expected_kernel_ver,
+                        actual_kernel_ver,
+                        is_timeout=False,
+                    )
                     return iteration
-                else:
-                    logger.info(f"✓ Correct kernel booted successfully")
+
+                logger.info("✓ Correct kernel booted successfully")
             else:
                 logger.warning("Could not verify booted kernel version")
 
@@ -641,16 +818,16 @@ class BisectMaster:
             self.state.update_iteration(
                 iteration_id,
                 final_result=test_result.value,
-                end_time=datetime.utcnow().isoformat()
+                end_time=datetime.utcnow().isoformat(),
             )
 
             # Mark in git bisect
             self.mark_commit(commit_sha, test_result)
 
-        except Exception as e:
-            logger.error(f"Iteration failed with exception: {e}")
+        except Exception as exc:
+            logger.error(f"Iteration failed with exception: {exc}")
             iteration.result = TestResult.SKIP
-            iteration.error = str(e)
+            iteration.error = str(exc)
 
         finally:
             iteration.end_time = datetime.utcnow().isoformat()
@@ -665,7 +842,11 @@ class BisectMaster:
         return iteration
 
     def run(self) -> bool:
-        """Run complete bisection"""
+        """Run complete bisection.
+
+        Returns:
+            True if bisection completed successfully, False otherwise
+        """
         logger.info("\n=== Starting Bisection ===\n")
 
         while True:
@@ -675,11 +856,6 @@ class BisectMaster:
             if not commit:
                 logger.info("No more commits to test - bisection complete!")
                 break
-
-            # Check if this is the first bad commit found
-            ret, bisect_status, _ = self.ssh.run_command(
-                f"cd {self.config.slave_kernel_path} && git bisect log"
-            )
 
             # Run iteration
             iteration = self.run_iteration(commit)
@@ -699,22 +875,24 @@ class BisectMaster:
         self.generate_report()
         return True
 
-    def save_state(self):
-        """Save bisection state to file"""
+    def save_state(self) -> None:
+        """Save bisection state to file."""
         state = {
             "good_commit": self.good_commit,
             "bad_commit": self.bad_commit,
             "iteration_count": self.iteration_count,
-            "current_iteration": asdict(self.current_iteration) if self.current_iteration else None,
+            "current_iteration": (
+                asdict(self.current_iteration) if self.current_iteration else None
+            ),
             "iterations": [asdict(it) for it in self.iterations],
-            "last_update": datetime.utcnow().isoformat()
+            "last_update": datetime.utcnow().isoformat(),
         }
 
-        with open(self.state_file, 'w') as f:
+        with open(self.state_file, "w") as f:
             json.dump(state, f, indent=2)
 
-    def generate_report(self):
-        """Generate bisection report"""
+    def generate_report(self) -> None:
+        """Generate bisection report."""
         logger.info("\n" + "=" * 60)
         logger.info("BISECTION REPORT")
         logger.info("=" * 60)
@@ -729,12 +907,15 @@ class BisectMaster:
         for iteration in self.iterations:
             status = iteration.result.value if iteration.result else "unknown"
             duration = f"{iteration.duration}s" if iteration.duration else "N/A"
-            logger.info(f"{iteration.iteration:3d}. {iteration.commit_short} | "
-                       f"{status:7s} | {duration:6s} | {iteration.commit_message[:50]}")
+            logger.info(
+                f"{iteration.iteration:3d}. {iteration.commit_short} | "
+                f"{status:7s} | {duration:6s} | {iteration.commit_message[:50]}"
+            )
 
         # Get final result from git bisect
         ret, stdout, _ = self.ssh.run_command(
-            f"cd {self.config.slave_kernel_path} && git bisect log | grep 'first bad commit' -A 5"
+            f"cd {self.config.slave_kernel_path} && "
+            f"git bisect log | grep 'first bad commit' -A 5"
         )
 
         if ret == 0 and stdout:
@@ -746,11 +927,8 @@ class BisectMaster:
         logger.info("=" * 60 + "\n")
 
 
-def main():
-    """Main entry point"""
-    # This would normally parse arguments
-    # For now, it's a placeholder
-
+def main() -> int:
+    """Main entry point."""
     print("Kernel Bisect Master Controller")
     print("Usage: Import this module and use the BisectMaster class")
     return 0
