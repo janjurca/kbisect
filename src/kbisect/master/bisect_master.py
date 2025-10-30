@@ -13,7 +13,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
+
+if TYPE_CHECKING:
+    from kbisect.master.console_collector import ConsoleCollector
+    from kbisect.master.ipmi_controller import IPMIController
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +79,10 @@ class BisectConfig:
         collect_baseline: Collect baseline system metadata
         collect_per_iteration: Collect metadata per iteration
         collect_kernel_config: Collect kernel .config files
+        collect_console_logs: Collect console logs during boot
+        console_collector_type: Console collector type (conserver, ipmi, auto)
+        console_hostname: Override hostname for console connection
+        console_fallback_ipmi: Fall back to IPMI SOL if conserver fails
     """
 
     slave_host: str
@@ -95,6 +104,10 @@ class BisectConfig:
     collect_baseline: bool = True
     collect_per_iteration: bool = True
     collect_kernel_config: bool = True
+    collect_console_logs: bool = False
+    console_collector_type: str = "auto"
+    console_hostname: Optional[str] = None
+    console_fallback_ipmi: bool = True
 
 
 @dataclass
@@ -294,6 +307,18 @@ class BisectMaster:
             self.session_id = self.state.create_session(good_commit, bad_commit)
             logger.debug(f"Created new session {self.session_id}")
 
+        # Initialize IPMI controller if configured
+        self.ipmi_controller: Optional["IPMIController"] = None  # noqa: UP037
+        if config.ipmi_host and config.ipmi_user and config.ipmi_password:
+            from kbisect.master.ipmi_controller import IPMIController
+
+            self.ipmi_controller = IPMIController(
+                config.ipmi_host, config.ipmi_user, config.ipmi_password
+            )
+
+        # Console collector (created per boot cycle)
+        self.active_console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
+
     def collect_and_store_metadata(
         self, collection_type: str, iteration_id: Optional[int] = None
     ) -> bool:
@@ -386,6 +411,123 @@ class BisectMaster:
 
         logger.warning("Could not find metadata record to link kernel config")
         return False
+
+    def _start_console_collection(self) -> Optional["ConsoleCollector"]:
+        """Start console log collection for boot cycle.
+
+        Returns:
+            ConsoleCollector instance if started successfully, None otherwise
+        """
+        if not self.config.collect_console_logs:
+            logger.info("Console log collection skipped (not configured)")
+            return None
+
+        from kbisect.master.console_collector import create_console_collector
+
+        # Determine hostname for console connection
+        console_hostname = self.config.console_hostname or self.config.slave_host
+
+        # Create collector
+        collector = create_console_collector(
+            hostname=console_hostname,
+            collector_type=self.config.console_collector_type,
+            ipmi_controller=self.ipmi_controller,
+        )
+
+        if not collector:
+            logger.warning("⊘ Console log collection skipped: no collector available")
+            return None
+
+        # Try to start collection
+        try:
+            if collector.start():
+                self.active_console_collector = collector
+                return collector
+
+            # Primary collector failed, try fallback
+            if self.config.console_fallback_ipmi and self.ipmi_controller:
+                logger.warning("⚠ Falling back to IPMI SOL for console logs")
+                from kbisect.master.console_collector import IPMISOLCollector
+
+                fallback_collector = IPMISOLCollector(console_hostname, self.ipmi_controller)
+                if fallback_collector.start():
+                    self.active_console_collector = fallback_collector
+                    return fallback_collector
+
+            logger.warning("⊘ Console log collection failed (could not start collector)")
+            return None
+
+        except Exception as exc:
+            logger.warning(f"⊘ Console log collection failed: {exc}")
+            return None
+
+    def _stop_console_collection(
+        self, collector: Optional["ConsoleCollector"]
+    ) -> Optional[str]:
+        """Stop console log collection and retrieve output.
+
+        Args:
+            collector: Console collector instance to stop
+
+        Returns:
+            Collected console output, or None if no output
+        """
+        if not collector:
+            return None
+
+        try:
+            output = collector.stop()
+            self.active_console_collector = None
+
+            if output:
+                lines = output.count("\n")
+                size_kb = len(output.encode("utf-8")) / 1024
+                logger.debug(f"Console log collected: {lines} lines, {size_kb:.1f} KB")
+                return output
+
+            logger.debug("Console log collection produced no output")
+            return None
+
+        except Exception as exc:
+            logger.error(f"Error stopping console collection: {exc}")
+            self.active_console_collector = None
+            return None
+
+    def _store_console_log(
+        self, iteration_id: int, content: Optional[str], boot_result: str
+    ) -> Optional[int]:
+        """Store console log in database.
+
+        Args:
+            iteration_id: Iteration ID
+            content: Console log content
+            boot_result: Boot result (success, timeout, panic, etc.)
+
+        Returns:
+            Log ID if stored successfully, None otherwise
+        """
+        if not content:
+            return None
+
+        try:
+            # Create header with boot result
+            header = f"=== Console Log: Boot Result = {boot_result} ===\n"
+            header += f"Timestamp: {datetime.utcnow().isoformat()}\n"
+            header += f"Size: {len(content.encode('utf-8'))} bytes\n"
+            header += "\n" + "=" * 80 + "\n\n"
+
+            full_content = header + content
+
+            # Store in build_logs table with log_type="console"
+            log_id = self.state.store_build_log(iteration_id, "console", full_content)
+
+            size_kb = self.state.get_build_log(log_id)["size_bytes"] / 1024
+            logger.info(f"✓ Console log captured (log_id: {log_id}, {size_kb:.1f} KB)")
+            return log_id
+
+        except Exception as exc:
+            logger.error(f"Failed to store console log: {exc}")
+            return None
 
     def initialize(self) -> bool:
         """Initialize bisection.
@@ -508,13 +650,19 @@ class BisectMaster:
         logger.debug(f"Kernel version: {stdout.strip()}")
         return True, ret, log_id
 
-    def reboot_slave(self) -> Tuple[bool, Optional[str]]:
+    def reboot_slave(self, iteration_id: int) -> Tuple[bool, Optional[str]]:
         """Reboot slave machine and return (success, booted_kernel_version).
+
+        Args:
+            iteration_id: Iteration ID for console log storage
 
         Returns:
             Tuple of (success, booted_kernel_version)
         """
         logger.info("Rebooting slave...")
+
+        # Start console log collection BEFORE reboot
+        console_collector = self._start_console_collection()
 
         # Send reboot command
         self.ssh.run_command("reboot", timeout=5)
@@ -536,6 +684,10 @@ class BisectMaster:
                 # Give it a bit more time to fully boot
                 time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
 
+                # Stop console collection and store log
+                console_output = self._stop_console_collection(console_collector)
+                self._store_console_log(iteration_id, console_output, "success")
+
                 # Get kernel version that booted
                 ret, kernel_ver, _ = self.ssh.call_function("get_kernel_version")
                 if ret == 0 and kernel_ver.strip():
@@ -547,12 +699,18 @@ class BisectMaster:
             if waited % 30 == 0:
                 logger.info(f"Still waiting... ({waited}/{max_wait}s)")
 
-        # Timeout! Try IPMI recovery if configured
+        # Timeout! Stop console collection and try IPMI recovery if configured
         logger.error("Slave failed to reboot within timeout")
+        console_output = self._stop_console_collection(console_collector)
+        self._store_console_log(iteration_id, console_output, "timeout")
+
         return self._try_ipmi_recovery()
 
-    def _try_ipmi_recovery(self) -> Tuple[bool, Optional[str]]:
-        """Try to recover slave using IPMI.
+    def _try_ipmi_recovery(self, max_attempts: int = 3) -> Tuple[bool, Optional[str]]:
+        """Try to recover slave using IPMI with retry logic.
+
+        Args:
+            max_attempts: Maximum number of recovery attempts
 
         Returns:
             Tuple of (success, booted_kernel_version)
@@ -561,48 +719,64 @@ class BisectMaster:
             logger.warning("IPMI not configured - cannot attempt automatic recovery")
             return (False, None)
 
-        logger.warning("Attempting IPMI power cycle for recovery...")
-        try:
-            from kbisect.master.ipmi_controller import IPMIController
+        logger.warning(f"Attempting IPMI recovery (up to {max_attempts} attempts)...")
 
-            ipmi = IPMIController(
-                self.config.ipmi_host, self.config.ipmi_user, self.config.ipmi_password
-            )
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.warning(f"IPMI recovery attempt {attempt}/{max_attempts}...")
+                from kbisect.master.ipmi_controller import IPMIController
 
-            # Force power cycle
-            ipmi.power_cycle()
-            logger.info("IPMI power cycle initiated, waiting for system to boot...")
+                ipmi = IPMIController(
+                    self.config.ipmi_host, self.config.ipmi_user, self.config.ipmi_password
+                )
 
-            # Wait again for slave to come back
-            time.sleep(DEFAULT_REBOOT_SETTLE_TIME)
-            ipmi_wait = 0
-            ipmi_max_wait = self.config.boot_timeout
+                # Force power cycle
+                ipmi.power_cycle()
+                logger.info("IPMI power cycle initiated, waiting for system to boot...")
 
-            while ipmi_wait < ipmi_max_wait:
-                time.sleep(5)
-                ipmi_wait += 5
+                # Wait for slave to come back
+                time.sleep(DEFAULT_REBOOT_SETTLE_TIME)
+                ipmi_wait = 0
+                ipmi_max_wait = self.config.boot_timeout
 
-                if self.ssh.is_alive():
-                    logger.info(f"✓ Slave recovered via IPMI after {ipmi_wait}s")
-                    time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
+                while ipmi_wait < ipmi_max_wait:
+                    time.sleep(5)
+                    ipmi_wait += 5
 
-                    # Get kernel version
-                    ret, kernel_ver, _ = self.ssh.call_function("get_kernel_version")
-                    if ret == 0 and kernel_ver.strip():
-                        logger.info(f"Booted into kernel: {kernel_ver.strip()}")
-                        return (True, kernel_ver.strip())
+                    if self.ssh.is_alive():
+                        logger.info(
+                            f"✓ Slave recovered via IPMI after {ipmi_wait}s "
+                            f"(attempt {attempt}/{max_attempts})"
+                        )
+                        time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
 
-                    return (True, None)
+                        # Get kernel version
+                        ret, kernel_ver, _ = self.ssh.call_function("get_kernel_version")
+                        if ret == 0 and kernel_ver.strip():
+                            logger.info(f"Booted into kernel: {kernel_ver.strip()}")
+                            return (True, kernel_ver.strip())
 
-                if ipmi_wait % 30 == 0:
-                    logger.info(f"Still waiting after IPMI... ({ipmi_wait}/{ipmi_max_wait}s)")
+                        return (True, None)
 
-            logger.error("IPMI recovery failed - slave still not responding")
-            return (False, None)
+                    if ipmi_wait % 30 == 0:
+                        logger.info(
+                            f"Still waiting after IPMI... ({ipmi_wait}/{ipmi_max_wait}s)"
+                        )
 
-        except Exception as exc:
-            logger.error(f"IPMI recovery failed: {exc}")
-            return (False, None)
+                # This attempt failed
+                logger.warning(f"Recovery attempt {attempt} failed - slave not responding")
+
+            except Exception as exc:
+                logger.warning(f"Recovery attempt {attempt} failed: {exc}")
+
+            # Wait before next attempt (unless this was the last one)
+            if attempt < max_attempts:
+                logger.warning("Retrying in 30 seconds...")
+                time.sleep(30)
+
+        # All attempts exhausted
+        logger.error(f"IPMI recovery failed after {max_attempts} attempts")
+        return (False, None)
 
     def run_tests(self) -> TestResult:
         """Run tests on slave.
@@ -704,11 +878,7 @@ class BisectMaster:
                 if is_timeout
                 else "Kernel panic detected - kernel failed to boot"
             )
-            logger.error("  Marking as BAD (boot test mode)")
-            self.mark_commit(commit_sha, TestResult.BAD)
-            self.state.update_iteration(
-                iteration_id, final_result="bad", error_message=iteration.error
-            )
+            result_str = "bad"
         else:
             # Custom test mode: can't test functionality if kernel doesn't boot
             iteration.result = TestResult.SKIP
@@ -717,11 +887,32 @@ class BisectMaster:
                 if is_timeout
                 else "Kernel panic detected - cannot test functionality, skipping commit"
             )
-            logger.warning("  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)")
-            self.mark_commit(commit_sha, TestResult.SKIP)
+            result_str = "skip"
+
+        # CRITICAL: Only mark commit if SSH is working
+        if not self.ssh.is_alive():
+            logger.critical("  ✗ Cannot mark commit - slave is unreachable")
+            logger.critical("  Bisection will halt - manual recovery required")
+            # Store iteration with error, but don't mark in git bisect yet
             self.state.update_iteration(
-                iteration_id, final_result="skip", error_message=iteration.error
+                iteration_id, error_message=iteration.error + " (git mark pending - slave down)"
             )
+            self.state.update_session(self.session_id, status="halted")
+            return
+
+        # SSH is working - safe to mark commit
+        if iteration.result == TestResult.BAD:
+            logger.error("  Marking as BAD (boot test mode)")
+            self.mark_commit(commit_sha, TestResult.BAD)
+        else:
+            logger.warning(
+                "  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)"
+            )
+            self.mark_commit(commit_sha, TestResult.SKIP)
+
+        self.state.update_iteration(
+            iteration_id, final_result=result_str, error_message=iteration.error
+        )
 
     def run_iteration(self, commit_sha: str) -> BisectIteration:
         """Run single bisection iteration.
@@ -788,13 +979,34 @@ class BisectMaster:
             iteration.state = BisectState.REBOOTING
             self.save_state()
 
-            reboot_success, actual_kernel_ver = self.reboot_slave()
+            reboot_success, actual_kernel_ver = self.reboot_slave(iteration_id)
 
             if not reboot_success:
                 # Boot timeout or complete failure
                 self._handle_boot_failure(
                     iteration, iteration_id, commit_sha, expected_kernel_ver, None, is_timeout=True
                 )
+
+                # Check if system is still down after recovery attempts
+                if not self.ssh.is_alive():
+                    logger.critical("\n" + "=" * 70)
+                    logger.critical("BISECTION HALTED - Slave Unreachable")
+                    logger.critical("=" * 70)
+                    logger.critical("\nThe slave machine failed to boot and could not be recovered.")
+                    logger.critical("All IPMI recovery attempts have been exhausted.")
+                    logger.critical("\nSession status: HALTED")
+                    logger.critical(f"Session ID: {self.session_id}")
+                    logger.critical(f"Failed commit: {commit_sha[:SHORT_COMMIT_LENGTH]}")
+                    logger.critical("\nManual intervention required:")
+                    logger.critical("  1. Check slave machine physical status")
+                    logger.critical("  2. Boot into a stable kernel manually")
+                    logger.critical("  3. Verify SSH connectivity")
+                    logger.critical("  4. Resume bisection: kbisect start")
+                    logger.critical("\nThe git bisect state has NOT been updated yet.")
+                    logger.critical("When you resume, this commit will be marked appropriately.")
+                    logger.critical("=" * 70 + "\n")
+                    sys.exit(1)
+
                 return iteration
 
             # Verify which kernel actually booted

@@ -88,6 +88,17 @@ metadata:
   compress_large_data: true         # Gzip large metadata files
   # Note: Metadata is stored in state_dir (default: current directory)
 
+# Console log collection (boot process logs)
+console_logs:
+  enabled: false                    # Enable console log collection during boot
+  collector: "auto"                 # "conserver" | "ipmi" | "auto"
+  # Override hostname for console connection (default: slave hostname)
+  hostname: null
+  # Fall back to IPMI SOL if conserver fails
+  fallback_to_ipmi: true
+  # Console logs are stored in database (build_logs table, log_type="console")
+  # View with: kbisect logs list --log-type console
+
 # Logging
 logging:
   level: INFO                       # DEBUG | INFO | WARNING | ERROR

@@ -81,6 +81,16 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
     # Get metadata settings from config
     metadata_config = config_dict.get("metadata", {})
 
+    # Get console log settings (CLI args override config file)
+    console_logs_config = config_dict.get("console_logs", {})
+    collect_console_logs = getattr(args, "collect_console_logs", None)
+    if collect_console_logs is None:
+        collect_console_logs = console_logs_config.get("enabled", False)
+
+    console_collector_type = getattr(args, "console_collector", None) or console_logs_config.get(
+        "collector", "auto"
+    )
+
     # Get slave host (CLI arg overrides config)
     slave_host = getattr(args, "slave_host", None) or config_dict["slave"]["hostname"]
 
@@ -105,6 +115,10 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
         collect_baseline=metadata_config.get("collect_baseline", True),
         collect_per_iteration=metadata_config.get("collect_per_iteration", True),
         collect_kernel_config=metadata_config.get("collect_kernel_config", True),
+        collect_console_logs=collect_console_logs,
+        console_collector_type=console_collector_type,
+        console_hostname=console_logs_config.get("hostname"),
+        console_fallback_ipmi=console_logs_config.get("fallback_to_ipmi", True),
     )
 
 
@@ -191,6 +205,90 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     good = args.good_commit or session.good_commit
     bad = args.bad_commit or session.bad_commit
+
+    # Check for halted session and handle resume
+    if session and session.status == "halted":
+        print("=" * 70)
+        print("RESUMING HALTED BISECTION SESSION")
+        print("=" * 70)
+        print(f"\nSession ID: {session.session_id}")
+        print(f"Good commit: {session.good_commit}")
+        print(f"Bad commit: {session.bad_commit}")
+        print(f"Started: {session.start_time}")
+
+        # Get last iteration to show what failed
+        iterations = state.get_iterations(session.session_id)
+        if iterations:
+            last_iteration = iterations[-1]
+            print(f"\nLast iteration: {last_iteration.iteration_num}")
+            print(f"Failed commit: {last_iteration.commit_sha[:7]}")
+            if last_iteration.error_message:
+                print(f"Error: {last_iteration.error_message}")
+
+        print("\nThe previous session was halted due to slave being unreachable.")
+        print("Before resuming, please ensure:")
+        print("  1. The slave machine is powered on and stable")
+        print("  2. A stable kernel is booted")
+        print("  3. SSH connectivity is working")
+
+        # Verify slave connectivity before resuming
+        print("\nVerifying slave connectivity...")
+        slave_host = args.slave_host or config_dict["slave"]["hostname"]
+        slave_user = config_dict["slave"].get("ssh_user", "root")
+
+        from kbisect.master.bisect_master import SSHClient
+
+        ssh = SSHClient(slave_host, slave_user)
+        if not ssh.is_alive():
+            print("\n✗ Slave is still unreachable!")
+            print(f"  Host: {slave_host}")
+            print("\nPlease fix the slave machine and try again.")
+            state.close()
+            return 1
+
+        print("✓ Slave is reachable\n")
+        print("Resuming bisection from halted state...")
+
+        # Check if there's a pending commit to mark
+        if iterations:
+            last_iteration = iterations[-1]
+            if last_iteration.error_message and "(git mark pending" in last_iteration.error_message:
+                print(f"Marking pending commit {last_iteration.commit_sha[:7]}...")
+
+                # Determine what to mark based on error message
+                if "Boot timeout" in last_iteration.error_message or "Kernel panic" in last_iteration.error_message:
+                    # Determine mark type based on original test type
+                    test_type = config_dict.get("tests", [{}])[0].get("type", "boot")
+                    if test_type == "boot":
+                        mark_as = "bad"
+                        print("  Boot test mode: marking as BAD")
+                    else:
+                        mark_as = "skip"
+                        print("  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)")
+
+                    # Mark the commit via SSH
+                    mark_cmd = f"cd {config_dict['slave'].get('kernel_path', '/root/kernel')} && git bisect {mark_as}"
+                    ret, _, stderr = ssh.run_command(mark_cmd)
+
+                    if ret == 0:
+                        print(f"✓ Commit marked as {mark_as}")
+                        # Update iteration with final result
+                        state.update_iteration(
+                            last_iteration.iteration_id,
+                            final_result=mark_as,
+                            error_message=last_iteration.error_message.replace(" (git mark pending - slave down)", "")
+                        )
+                    else:
+                        print(f"✗ Failed to mark commit: {stderr}")
+                        print("  Please mark manually and try again")
+                        state.close()
+                        return 1
+
+        print("Bisection will continue from next commit.")
+        print("=" * 70 + "\n")
+
+        # Update session status back to running
+        state.update_session(session.session_id, status="running")
 
     # Create bisect config
     config = create_bisect_config(config_dict, args)
@@ -583,6 +681,16 @@ def create_parser() -> argparse.ArgumentParser:
     parser_init.add_argument(
         "--use-running-config", action="store_true", help="Use running kernel config as base"
     )
+    parser_init.add_argument(
+        "--collect-console-logs",
+        action="store_true",
+        help="Enable console log collection during boot",
+    )
+    parser_init.add_argument(
+        "--console-collector",
+        choices=["conserver", "ipmi", "auto"],
+        help="Console collector type (overrides config)",
+    )
 
     # start command
     parser_start = subparsers.add_parser("start", help="Start bisection")
@@ -594,6 +702,16 @@ def create_parser() -> argparse.ArgumentParser:
     parser_start.add_argument("--kernel-config", help="Path to kernel .config file to use as base")
     parser_start.add_argument(
         "--use-running-config", action="store_true", help="Use running kernel config as base"
+    )
+    parser_start.add_argument(
+        "--collect-console-logs",
+        action="store_true",
+        help="Enable console log collection during boot",
+    )
+    parser_start.add_argument(
+        "--console-collector",
+        choices=["conserver", "ipmi", "auto"],
+        help="Console collector type (overrides config)",
     )
 
     # status command
