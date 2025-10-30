@@ -162,6 +162,21 @@ class StateManager:
             )
         """)
 
+        # Build logs table
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS build_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                iteration_id INTEGER NOT NULL,
+                log_type TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                log_content BLOB NOT NULL,
+                compressed BOOLEAN DEFAULT 1,
+                size_bytes INTEGER,
+                exit_code INTEGER,
+                FOREIGN KEY (iteration_id) REFERENCES iterations(iteration_id)
+            )
+        """)
+
         # Metadata tables
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS metadata (
@@ -314,7 +329,7 @@ class StateManager:
             return
 
         set_clause = ", ".join([f"{k} = ?" for k in updates])
-        values = list(updates.values()) + [session_id]
+        values = [*updates.values(), session_id]
 
         try:
             self.conn.execute(
@@ -403,7 +418,7 @@ class StateManager:
             return
 
         set_clause = ", ".join([f"{k} = ?" for k in updates])
-        values = list(updates.values()) + [iteration_id]
+        values = [*updates.values(), iteration_id]
 
         try:
             self.conn.execute(
@@ -508,6 +523,184 @@ class StateManager:
             (iteration_id,),
         )
 
+        return [dict(row) for row in cursor.fetchall()]
+
+    def store_build_log(
+        self, iteration_id: int, log_type: str, content: str, exit_code: int = 0
+    ) -> int:
+        """Store build log with compression.
+
+        Args:
+            iteration_id: Iteration ID
+            log_type: Type of log (build, boot, test)
+            content: Log content to store
+            exit_code: Exit code of the command that generated the log
+
+        Returns:
+            Log ID
+
+        Raises:
+            DatabaseError: If log storage fails
+        """
+        if not self.conn:
+            raise DatabaseError("Database not initialized")
+
+        import gzip
+
+        # Compress log content
+        compressed_content = gzip.compress(content.encode("utf-8"))
+        size_bytes = len(compressed_content)
+
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO build_logs (
+                    iteration_id, log_type, timestamp, log_content,
+                    compressed, size_bytes, exit_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    iteration_id,
+                    log_type,
+                    datetime.now(timezone.utc).isoformat(),
+                    compressed_content,
+                    True,
+                    size_bytes,
+                    exit_code,
+                ),
+            )
+
+            self.conn.commit()
+            log_id = cursor.lastrowid
+
+            logger.debug(f"Stored {log_type} log {log_id} ({size_bytes} bytes compressed)")
+            return log_id
+        except sqlite3.Error as exc:
+            msg = f"Failed to store build log: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+
+    def get_build_log(self, log_id: int) -> Optional[Dict[str, Any]]:
+        """Get and decompress build log by ID.
+
+        Args:
+            log_id: Log ID to retrieve
+
+        Returns:
+            Dictionary with log data including decompressed content, or None if not found
+        """
+        if not self.conn:
+            raise DatabaseError("Database not initialized")
+
+        import gzip
+
+        cursor = self.conn.execute(
+            """
+            SELECT bl.*, i.iteration_num, i.commit_sha, i.commit_message
+            FROM build_logs bl
+            JOIN iterations i ON bl.iteration_id = i.iteration_id
+            WHERE bl.log_id = ?
+            """,
+            (log_id,),
+        )
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        # Decompress content
+        content = row["log_content"]
+        if row["compressed"]:
+            content = gzip.decompress(content).decode("utf-8")
+        else:
+            content = content.decode("utf-8")
+
+        return {
+            "log_id": row["log_id"],
+            "iteration_id": row["iteration_id"],
+            "iteration_num": row["iteration_num"],
+            "commit_sha": row["commit_sha"],
+            "commit_message": row["commit_message"],
+            "log_type": row["log_type"],
+            "timestamp": row["timestamp"],
+            "content": content,
+            "size_bytes": row["size_bytes"],
+            "exit_code": row["exit_code"],
+            "compressed": row["compressed"],
+        }
+
+    def get_iteration_build_logs(self, iteration_id: int) -> List[Dict[str, Any]]:
+        """Get all build logs for an iteration.
+
+        Args:
+            iteration_id: Iteration ID
+
+        Returns:
+            List of log metadata dictionaries (without content)
+        """
+        if not self.conn:
+            raise DatabaseError("Database not initialized")
+
+        cursor = self.conn.execute(
+            """
+            SELECT log_id, log_type, timestamp, size_bytes, exit_code
+            FROM build_logs
+            WHERE iteration_id = ?
+            ORDER BY timestamp
+            """,
+            (iteration_id,),
+        )
+
+        return [dict(row) for row in cursor.fetchall()]
+
+    def list_build_logs(
+        self, session_id: Optional[int] = None, log_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """List all build logs with metadata.
+
+        Args:
+            session_id: Optional session ID filter
+            log_type: Optional log type filter (build, boot, test)
+
+        Returns:
+            List of log metadata dictionaries
+        """
+        if not self.conn:
+            raise DatabaseError("Database not initialized")
+
+        query = """
+            SELECT
+                bl.log_id,
+                bl.iteration_id,
+                i.iteration_num,
+                i.commit_sha,
+                bl.log_type,
+                bl.timestamp,
+                bl.size_bytes,
+                bl.exit_code,
+                CASE WHEN bl.exit_code = 0 THEN 'SUCCESS' ELSE 'FAILED' END as status
+            FROM build_logs bl
+            JOIN iterations i ON bl.iteration_id = i.iteration_id
+        """
+
+        conditions = []
+        params = []
+
+        if session_id is not None:
+            conditions.append("i.session_id = ?")
+            params.append(session_id)
+
+        if log_type is not None:
+            conditions.append("bl.log_type = ?")
+            params.append(log_type)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += " ORDER BY bl.timestamp DESC"
+
+        cursor = self.conn.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
     def store_metadata(
@@ -696,7 +889,7 @@ class StateManager:
 
         path = Path(file_path)
         if path.exists():
-            with open(path, "rb") as f:
+            with path.open("rb") as f:
                 content = f.read()
                 file_hash = hashlib.sha256(content).hexdigest()
                 file_size = len(content)

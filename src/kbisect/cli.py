@@ -56,7 +56,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         logger.info("  kernel-bisect/config/bisect.conf.example")
         sys.exit(1)
 
-    with open(path) as f:
+    with path.open() as f:
         return yaml.safe_load(f)
 
 
@@ -215,11 +215,11 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 1
 
 
-def cmd_status(args: argparse.Namespace) -> int:
+def cmd_status(_args: argparse.Namespace) -> int:
     """Show bisection status.
 
     Args:
-        args: Parsed command-line arguments
+        _args: Parsed command-line arguments (unused)
 
     Returns:
         Exit code (0 for success, 1 for failure)
@@ -286,7 +286,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     report = state.export_report(session_id, format=args.format)
 
     if args.output:
-        with open(args.output, "w") as f:
+        output_path = Path(args.output)
+        with output_path.open("w") as f:
             f.write(report)
         print(f"Report saved to: {args.output}")
     else:
@@ -382,6 +383,120 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Manage build logs.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    state = StateManager()
+
+    if args.logs_command == "list":
+        # List all logs
+        session_id = args.session_id
+        log_type = args.log_type
+
+        logs = state.list_build_logs(session_id=session_id, log_type=log_type)
+
+        if not logs:
+            print("No build logs found")
+            return 0
+
+        print("=== Build Logs ===\n")
+        print(f"{'Log ID':<8} {'Iter':<6} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}")
+        print("-" * 80)
+
+        for log in logs:
+            size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
+            timestamp = log["timestamp"][:19] if log["timestamp"] else "N/A"
+            print(
+                f"{log['log_id']:<8} {log['iteration_num']:<6} "
+                f"{log['commit_sha'][:7]:<9} {log['log_type']:<8} "
+                f"{log['status']:<10} {size_kb:>7.1f} KB {timestamp:<20}"
+            )
+
+    elif args.logs_command == "show":
+        # Show specific log
+        log_data = state.get_build_log(args.log_id)
+
+        if not log_data:
+            print(f"Log {args.log_id} not found")
+            return 1
+
+        print(f"=== Build Log {args.log_id} ===\n")
+        print(f"Iteration:     {log_data['iteration_num']}")
+        print(f"Commit:        {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
+        print(f"Type:          {log_data['log_type']}")
+        print(f"Exit code:     {log_data['exit_code']}")
+        print(f"Size:          {log_data['size_bytes'] / 1024:.1f} KB (compressed)")
+        print(f"Timestamp:     {log_data['timestamp']}")
+        print("\n" + "=" * 80 + "\n")
+        print(log_data["content"])
+
+    elif args.logs_command == "iteration":
+        # Show logs for specific iteration
+        # First get iteration to validate and get session info
+        session = state.get_latest_session()
+        if not session:
+            print("No active bisection session found")
+            return 1
+
+        iterations = state.get_iterations(session.session_id)
+        target_iteration = None
+
+        for it in iterations:
+            if it.iteration_num == args.iteration_num:
+                target_iteration = it
+                break
+
+        if not target_iteration:
+            print(f"Iteration {args.iteration_num} not found")
+            return 1
+
+        # Get logs for this iteration
+        logs = state.get_iteration_build_logs(target_iteration.iteration_id)
+
+        if not logs:
+            print(f"No logs found for iteration {args.iteration_num}")
+            return 0
+
+        print(f"=== Logs for Iteration {args.iteration_num} ===\n")
+        print(f"Commit: {target_iteration.commit_sha[:7]} - {target_iteration.commit_message}")
+        print("\nLogs:")
+
+        for log in logs:
+            size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
+            exit_status = "SUCCESS" if log["exit_code"] == 0 else "FAILED"
+            print(f"  Log ID {log['log_id']}: {log['log_type']} - {exit_status} ({size_kb:.1f} KB)")
+
+        print("\nView log: kbisect logs show <log-id>")
+
+    elif args.logs_command == "export":
+        # Export log to file
+        log_data = state.get_build_log(args.log_id)
+
+        if not log_data:
+            print(f"Log {args.log_id} not found")
+            return 1
+
+        output_path = Path(args.output_file)
+
+        try:
+            with output_path.open("w") as f:
+                f.write(log_data["content"])
+            print(f"Log {args.log_id} exported to: {output_path}")
+            print(f"Size: {output_path.stat().st_size / 1024:.1f} KB (uncompressed)")
+        except Exception as exc:
+            print(f"Failed to export log: {exc}")
+            return 1
+
+    state.close()
+    return 0
+
+
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Deploy slave components.
 
@@ -407,7 +522,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         print(f"Verifying deployment on {slave_host}...")
         if deployer.is_deployed():
             print("\n✓ Slave is deployed")
-            success, checks = deployer.verify_deployment()
+            success, _checks = deployer.verify_deployment()
             return 0 if success else 1
 
         print("\n✗ Slave is NOT deployed")
@@ -482,7 +597,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # status command
-    parser_status = subparsers.add_parser("status", help="Show bisection status")
+    subparsers.add_parser("status", help="Show bisection status")
 
     # report command
     parser_report = subparsers.add_parser("report", help="Generate bisection report")
@@ -519,6 +634,32 @@ def create_parser() -> argparse.ArgumentParser:
         "--update-only", action="store_true", help="Only update library, do not full deploy"
     )
 
+    # logs command
+    parser_logs = subparsers.add_parser("logs", help="Manage build logs")
+    logs_subparsers = parser_logs.add_subparsers(dest="logs_command", help="Log commands")
+
+    # logs list
+    parser_logs_list = logs_subparsers.add_parser("list", help="List all build logs")
+    parser_logs_list.add_argument("--session-id", type=int, help="Filter by session ID")
+    parser_logs_list.add_argument(
+        "--log-type", choices=["build", "boot", "test"], help="Filter by log type"
+    )
+
+    # logs show
+    parser_logs_show = logs_subparsers.add_parser("show", help="Show specific build log")
+    parser_logs_show.add_argument("log_id", type=int, help="Log ID to display")
+
+    # logs iteration
+    parser_logs_iteration = logs_subparsers.add_parser(
+        "iteration", help="Show logs for specific iteration"
+    )
+    parser_logs_iteration.add_argument("iteration_num", type=int, help="Iteration number")
+
+    # logs export
+    parser_logs_export = logs_subparsers.add_parser("export", help="Export log to file")
+    parser_logs_export.add_argument("log_id", type=int, help="Log ID to export")
+    parser_logs_export.add_argument("output_file", help="Output file path")
+
     return parser
 
 
@@ -549,6 +690,8 @@ def main() -> int:
             return cmd_ipmi(args)
         if args.command == "deploy":
             return cmd_deploy(args)
+        if args.command == "logs":
+            return cmd_logs(args)
 
         parser.print_help()
         return 1

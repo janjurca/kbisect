@@ -408,7 +408,7 @@ class BisectMaster:
 
         # Initialize protection on slave
         logger.info("Initializing kernel protection on slave...")
-        ret, stdout, stderr = self.ssh.call_function("init_protection")
+        ret, _stdout, stderr = self.ssh.call_function("init_protection")
 
         if ret != 0:
             logger.error(f"Failed to initialize protection: {stderr}")
@@ -451,14 +451,15 @@ class BisectMaster:
 
         return commit
 
-    def build_kernel(self, commit_sha: str) -> bool:
-        """Build kernel on slave.
+    def build_kernel(self, commit_sha: str, iteration_id: int) -> Tuple[bool, int, Optional[int]]:
+        """Build kernel on slave and store build log.
 
         Args:
             commit_sha: Commit SHA to build
+            iteration_id: Iteration ID for log storage
 
         Returns:
-            True if build successful, False otherwise
+            Tuple of (success, exit_code, log_id)
         """
         logger.info(f"Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}...")
 
@@ -480,14 +481,32 @@ class BisectMaster:
             timeout=self.config.build_timeout,
         )
 
-        if ret != 0:
-            logger.error(f"Kernel build failed: {stderr}")
-            logger.debug(f"Build output: {stdout}")
-            return False
+        # Combine stdout and stderr for full log
+        full_log = f"=== Build Kernel: {commit_sha[:SHORT_COMMIT_LENGTH]} ===\n"
+        full_log += f"Kernel source: {self.config.slave_kernel_path}\n"
+        full_log += f"Config: {kernel_config or 'default'}\n"
+        full_log += f"Exit code: {ret}\n"
+        full_log += "\n=== STDOUT ===\n"
+        full_log += stdout
+        full_log += "\n=== STDERR ===\n"
+        full_log += stderr
 
-        logger.info("✓ Kernel build complete")
+        # Store build log in database
+        log_id = self.state.store_build_log(iteration_id, "build", full_log, exit_code=ret)
+
+        # Format size for display
+        size_kb = self.state.get_build_log(log_id)["size_bytes"] / 1024
+
+        if ret != 0:
+            logger.error(
+                f"✗ Kernel build FAILED (log_id: {log_id}, {size_kb:.1f} KB compressed)"
+            )
+            logger.error(f"  View log: kbisect logs show {log_id}")
+            return False, ret, log_id
+
+        logger.info(f"✓ Kernel build complete (log_id: {log_id}, {size_kb:.1f} KB)")
         logger.debug(f"Kernel version: {stdout.strip()}")
-        return True
+        return True, ret, log_id
 
     def reboot_slave(self) -> Tuple[bool, Optional[str]]:
         """Reboot slave machine and return (success, booted_kernel_version).
@@ -636,7 +655,7 @@ class BisectMaster:
             logger.error(f"Cannot mark commit with result: {result}")
             return False
 
-        ret, stdout, stderr = self.ssh.run_command(
+        ret, _stdout, stderr = self.ssh.run_command(
             f"cd {self.config.slave_kernel_path} && {bisect_cmd}"
         )
 
@@ -744,7 +763,8 @@ class BisectMaster:
             iteration.state = BisectState.BUILDING
             self.save_state()
 
-            if not self.build_kernel(commit_sha):
+            success, _exit_code, _log_id = self.build_kernel(commit_sha, iteration_id)
+            if not success:
                 iteration.result = TestResult.SKIP
                 iteration.error = "Build failed"
                 logger.error("Build failed, skipping commit")
@@ -863,7 +883,7 @@ class BisectMaster:
             logger.info(f"Result: {iteration.result.value}")
 
             # Check if bisection is done
-            ret, stdout, _ = self.ssh.run_command(
+            _ret, stdout, _ = self.ssh.run_command(
                 f"cd {self.config.slave_kernel_path} && git bisect log | tail -1"
             )
 
@@ -888,7 +908,7 @@ class BisectMaster:
             "last_update": datetime.utcnow().isoformat(),
         }
 
-        with open(self.state_file, "w") as f:
+        with self.state_file.open("w") as f:
             json.dump(state, f, indent=2)
 
     def generate_report(self) -> None:
