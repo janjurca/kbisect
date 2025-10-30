@@ -6,6 +6,7 @@ Orchestrates the kernel bisection process across master and slave machines.
 
 import json
 import logging
+import shlex
 import subprocess
 import sys
 import time
@@ -29,7 +30,6 @@ DEFAULT_TEST_TIMEOUT = 600
 DEFAULT_BUILD_TIMEOUT = 1800
 DEFAULT_REBOOT_SETTLE_TIME = 10
 DEFAULT_POST_BOOT_SETTLE_TIME = 10
-LOG_FILE_PATH = "/var/log/kernel-bisect-master.log"
 COMMIT_HASH_LENGTH = 40
 SHORT_COMMIT_LENGTH = 7
 
@@ -220,11 +220,11 @@ class SSHClient:
         Returns:
             Tuple of (return_code, stdout, stderr)
         """
-        # Escape and quote arguments
-        args_str = " ".join(f'"{arg}"' for arg in args)
+        # Properly escape arguments to prevent command injection
+        args_str = " ".join(shlex.quote(str(arg)) for arg in args)
 
-        # Source library and call function
-        command = f"source {library_path} && {function_name} {args_str}"
+        # Source library and call function (quote paths for safety)
+        command = f"source {shlex.quote(library_path)} && {function_name} {args_str}"
 
         return self.run_command(command, timeout=timeout)
 
@@ -298,14 +298,9 @@ class BisectMaster:
 
         self.state = StateManager(db_path=config.db_path)
 
-        # Check for existing running session or create new one
-        existing_session = self.state.get_latest_session()
-        if existing_session and existing_session.status == "running":
-            self.session_id = existing_session.session_id
-            logger.info(f"Resuming existing session {self.session_id}")
-        else:
-            self.session_id = self.state.create_session(good_commit, bad_commit)
-            logger.debug(f"Created new session {self.session_id}")
+        # Atomically get existing running session or create new one
+        # This prevents race conditions when multiple instances are created
+        self.session_id = self.state.get_or_create_session(good_commit, bad_commit)
 
         # Initialize IPMI controller if configured
         self.ipmi_controller: Optional["IPMIController"] = None  # noqa: UP037
@@ -521,8 +516,13 @@ class BisectMaster:
             # Store in build_logs table with log_type="console"
             log_id = self.state.store_build_log(iteration_id, "console", full_content)
 
-            size_kb = self.state.get_build_log(log_id)["size_bytes"] / 1024
-            logger.info(f"✓ Console log captured (log_id: {log_id}, {size_kb:.1f} KB)")
+            # Verify log was stored successfully
+            log_data = self.state.get_build_log(log_id)
+            if log_data and "size_bytes" in log_data:
+                size_kb = log_data["size_bytes"] / 1024
+                logger.info(f"✓ Console log captured (log_id: {log_id}, {size_kb:.1f} KB)")
+            else:
+                logger.warning(f"Console log stored with ID {log_id} but verification failed")
             return log_id
 
         except Exception as exc:
@@ -587,8 +587,17 @@ class BisectMaster:
             return None
 
         commit = stdout.strip()
+
+        # Validate commit hash: must be 40 characters and hexadecimal
         if not commit or len(commit) != COMMIT_HASH_LENGTH:
-            logger.error(f"Invalid commit hash: {commit}")
+            logger.error(f"Invalid commit hash length: {commit}")
+            return None
+
+        # Validate hexadecimal format
+        try:
+            int(commit, 16)
+        except ValueError:
+            logger.error(f"Invalid commit hash format (not hexadecimal): {commit}")
             return None
 
         return commit
@@ -1081,7 +1090,26 @@ class BisectMaster:
         """
         logger.info("\n=== Starting Bisection ===\n")
 
+        # Safety limit to prevent infinite loops
+        MAX_ITERATIONS = 1000
+        iteration_count = 0
+
         while True:
+            iteration_count += 1
+
+            # Safety check: prevent infinite loops
+            if iteration_count > MAX_ITERATIONS:
+                logger.error(
+                    f"SAFETY LIMIT REACHED: Exceeded {MAX_ITERATIONS} iterations. "
+                    "Bisection may be stuck in an infinite loop. Stopping."
+                )
+                self.state.update_session(
+                    self.session_id,
+                    status="failed",
+                    end_time=datetime.utcnow().isoformat(),
+                )
+                return False
+
             # Get next commit to test
             commit = self.get_next_commit()
 

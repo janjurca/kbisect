@@ -10,7 +10,8 @@ import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from collections import deque
+from typing import Deque, List, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,8 @@ class ConsoleCollector(ABC):
         self.hostname = hostname
         self.max_buffer_lines = max_buffer_lines
         self.is_active = False
-        self.buffer: List[str] = []
+        # Use deque with maxlen for automatic size limiting and better performance
+        self.buffer: Deque[str] = deque(maxlen=max_buffer_lines)
         self.start_time: Optional[float] = None
 
     @abstractmethod
@@ -172,15 +174,8 @@ class ConserverCollector(ConsoleCollector):
                     break
 
                 with self.lock:
+                    # deque with maxlen automatically maintains size limit
                     self.buffer.append(line)
-
-                    # Enforce buffer limit (drop oldest lines)
-                    if len(self.buffer) > self.max_buffer_lines:
-                        dropped = len(self.buffer) - self.max_buffer_lines
-                        self.buffer = self.buffer[-self.max_buffer_lines :]
-                        logger.warning(
-                            f"Console buffer limit reached, dropped {dropped} oldest lines"
-                        )
 
         except Exception as exc:
             logger.debug(f"Console reader thread exception: {exc}")
@@ -213,7 +208,22 @@ class ConserverCollector(ConsoleCollector):
             if self.reader_thread and self.reader_thread.is_alive():
                 self.reader_thread.join(timeout=2.0)
 
-            # Retrieve buffered output
+                # Check if thread is still running after timeout
+                if self.reader_thread.is_alive():
+                    logger.warning(
+                        "Reader thread still running after timeout. "
+                        "Waiting additional time to prevent race condition..."
+                    )
+                    # Give it more time to finish
+                    self.reader_thread.join(timeout=3.0)
+
+                    if self.reader_thread.is_alive():
+                        logger.error(
+                            "Reader thread did not terminate. Buffer may be incomplete "
+                            "or contain concurrent access artifacts."
+                        )
+
+            # Retrieve buffered output (with lock to ensure thread safety)
             with self.lock:
                 output = "".join(self.buffer)
                 buffer_size = len(self.buffer)
@@ -315,11 +325,8 @@ class IPMISOLCollector(ConsoleCollector):
                 with self.lock:
                     # Split into lines for consistent buffer handling
                     lines = output.splitlines(keepends=True)
+                    # deque with maxlen automatically maintains size limit
                     self.buffer.extend(lines)
-
-                    # Enforce buffer limit
-                    if len(self.buffer) > self.max_buffer_lines:
-                        self.buffer = self.buffer[-self.max_buffer_lines :]
 
         except Exception as exc:
             logger.debug(f"IPMI SOL capture exception: {exc}")
@@ -342,7 +349,22 @@ class IPMISOLCollector(ConsoleCollector):
                 logger.debug("Waiting for IPMI SOL session to complete...")
                 self.collection_thread.join(timeout=10.0)
 
-            # Retrieve buffered output
+                # Check if thread is still running after timeout
+                if self.collection_thread.is_alive():
+                    logger.warning(
+                        "IPMI SOL thread still running after 10s timeout. "
+                        "Waiting additional time..."
+                    )
+                    # SOL sessions can take a while, give it more time
+                    self.collection_thread.join(timeout=30.0)
+
+                    if self.collection_thread.is_alive():
+                        logger.error(
+                            "IPMI SOL thread did not terminate after 40s total. "
+                            "Thread will be left running (orphaned). Buffer may be incomplete."
+                        )
+
+            # Retrieve buffered output (with lock to ensure thread safety)
             with self.lock:
                 output = "".join(self.buffer)
                 buffer_size = len(self.buffer)

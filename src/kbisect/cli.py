@@ -529,7 +529,8 @@ def cmd_logs(args: argparse.Namespace) -> int:
         print(f"Commit:        {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
         print(f"Type:          {log_data['log_type']}")
         print(f"Exit code:     {log_data['exit_code']}")
-        print(f"Size:          {log_data['size_bytes'] / 1024:.1f} KB (compressed)")
+        size_kb = log_data['size_bytes'] / 1024 if log_data.get('size_bytes') else 0
+        print(f"Size:          {size_kb:.1f} KB (compressed)")
         print(f"Timestamp:     {log_data['timestamp']}")
         print("\n" + "=" * 80 + "\n")
         print(log_data["content"])
@@ -586,7 +587,9 @@ def cmd_logs(args: argparse.Namespace) -> int:
             with output_path.open("w") as f:
                 f.write(log_data["content"])
             print(f"Log {args.log_id} exported to: {output_path}")
-            print(f"Size: {output_path.stat().st_size / 1024:.1f} KB (uncompressed)")
+            file_size = output_path.stat().st_size
+            size_kb = file_size / 1024 if file_size else 0
+            print(f"Size: {size_kb:.1f} KB (uncompressed)")
         except Exception as exc:
             print(f"Failed to export log: {exc}")
             return 1

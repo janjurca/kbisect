@@ -5,7 +5,9 @@ Handles power control, serial console access, and boot device configuration.
 """
 
 import logging
+import os
 import subprocess
+import tempfile
 import time
 from enum import Enum
 from typing import List, Optional, Tuple
@@ -89,23 +91,36 @@ class IPMIController:
             IPMITimeoutError: If command times out
             IPMICommandError: If command fails to execute
         """
-        cmd = [
-            "ipmitool",
-            "-I",
-            "lanplus",
-            "-H",
-            self.ipmi_host,
-            "-U",
-            self.ipmi_user,
-            "-P",
-            self.ipmi_password,
-        ] + args
-
+        # Use temporary file for password to avoid exposing it in process list
+        password_file = None
         try:
+            # Create secure temporary file for password
+            fd, password_file = tempfile.mkstemp(prefix="ipmi_", suffix=".tmp", text=True)
+            try:
+                os.write(fd, self.ipmi_password.encode("utf-8"))
+            finally:
+                os.close(fd)
+
+            # Set restrictive permissions (only owner can read)
+            os.chmod(password_file, 0o600)
+
+            cmd = [
+                "ipmitool",
+                "-I",
+                "lanplus",
+                "-H",
+                self.ipmi_host,
+                "-U",
+                self.ipmi_user,
+                "-f",
+                password_file,
+            ] + args
+
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout, check=False
             )
             return result.returncode, result.stdout, result.stderr
+
         except subprocess.TimeoutExpired as exc:
             msg = f"IPMI command timed out after {timeout}s"
             logger.error(msg)
@@ -114,6 +129,36 @@ class IPMIController:
             msg = f"IPMI command failed: {exc}"
             logger.error(msg)
             raise IPMICommandError(msg) from exc
+        finally:
+            # Clean up password file - CRITICAL for security
+            if password_file and os.path.exists(password_file):
+                # Try multiple times with increasing force
+                deleted = False
+                for attempt in range(3):
+                    try:
+                        # Ensure file is writable before deletion
+                        os.chmod(password_file, 0o600)
+                        os.unlink(password_file)
+                        deleted = True
+                        break
+                    except OSError as e:
+                        if attempt < 2:
+                            time.sleep(0.1)  # Brief delay before retry
+                        else:
+                            # SECURITY WARNING: Password file could not be deleted
+                            logger.error(
+                                f"SECURITY: Failed to delete IPMI password file {password_file} "
+                                f"after {attempt + 1} attempts: {e}. Manual cleanup required!"
+                            )
+
+                if not deleted:
+                    # Last resort: try to zero out the file content
+                    try:
+                        with open(password_file, 'w') as f:
+                            f.write('')
+                        logger.warning(f"Zeroed out password file {password_file} but could not delete it")
+                    except Exception as zero_exc:
+                        logger.error(f"Failed to zero out password file: {zero_exc}")
 
     def get_power_status(self) -> PowerState:
         """Get current power status of the system.

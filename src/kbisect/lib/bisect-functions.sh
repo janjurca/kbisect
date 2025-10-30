@@ -179,24 +179,51 @@ build_kernel() {
     # Set as next boot (ONE-TIME BOOT)
     # This ensures that if the kernel panics, next reboot automatically falls back
     # to the protected kernel (which remains as permanent default)
+    local boot_set=false
     if command -v grub2-reboot &> /dev/null; then
         # RHEL/Fedora/Rocky - find boot entry and set one-time boot
         local entry_index=$(grubby --info="$bootfile" 2>/dev/null | grep '^index=' | cut -d= -f2)
         if [ -n "$entry_index" ]; then
-            grub2-reboot "$entry_index" 2>/dev/null
+            if grub2-reboot "$entry_index" 2>/dev/null; then
+                boot_set=true
+            else
+                echo "ERROR: grub2-reboot failed for entry $entry_index" >&2
+                return 1
+            fi
         else
             echo "Warning: Could not find boot entry for $bootfile, using grubby fallback" >&2
-            grubby --set-default "$bootfile" 2>/dev/null
+            if grubby --set-default "$bootfile" 2>/dev/null; then
+                boot_set=true
+            else
+                echo "ERROR: grubby --set-default failed" >&2
+                return 1
+            fi
         fi
     elif command -v grub-reboot &> /dev/null; then
         # Debian/Ubuntu - use grub-reboot with kernel version
-        grub-reboot "$kernel_version" 2>/dev/null
+        if grub-reboot "$kernel_version" 2>/dev/null; then
+            boot_set=true
+        else
+            echo "ERROR: grub-reboot failed for kernel $kernel_version" >&2
+            return 1
+        fi
     elif command -v grubby &> /dev/null; then
         # Fallback: use grubby (WARNING: this sets permanent default, not one-time)
         echo "Warning: grub-reboot not available, using grubby (not one-time boot)" >&2
-        grubby --set-default "$bootfile" 2>/dev/null
+        if grubby --set-default "$bootfile" 2>/dev/null; then
+            boot_set=true
+        else
+            echo "ERROR: grubby --set-default failed" >&2
+            return 1
+        fi
     else
-        echo "Warning: No GRUB boot manager found, manual boot selection may be required" >&2
+        echo "ERROR: No GRUB boot manager found (grub2-reboot, grub-reboot, or grubby)" >&2
+        return 1
+    fi
+
+    if [ "$boot_set" != "true" ]; then
+        echo "ERROR: Failed to set boot kernel" >&2
+        return 1
     fi
 
     # Restore Makefile
@@ -225,7 +252,7 @@ cleanup_old_kernels() {
     local bisect_kernels=($(ls -t /boot/vmlinuz-*-bisect-* 2>/dev/null | tac))
     local total=${#bisect_kernels[@]}
 
-    if [ $total -le $keep_count ]; then
+    if [ "$total" -le "$keep_count" ]; then
         echo "No cleanup needed ($total kernels)" >&2
         return 0
     fi
@@ -235,7 +262,7 @@ cleanup_old_kernels() {
 
     local removed=0
     for kernel_path in "${bisect_kernels[@]}"; do
-        [ $removed -ge $remove_count ] && break
+        [ "$removed" -ge "$remove_count" ] && break
 
         local version=$(basename "$kernel_path" | sed 's/vmlinuz-//')
 
