@@ -20,6 +20,22 @@ slave:
   kernel_path: /root/kernel          # Path to kernel source on slave
   bisect_path: /root/kernel-bisect/lib  # Path where bisect library will be deployed
 
+# Kernel repository (optional - automatic repository deployment)
+# If configured, the repository will be cloned/copied on master and transferred to slave
+# This eliminates the need to manually clone the kernel source on the slave
+kernel_repo:
+  # Git repository URL or local filesystem path
+  # Examples:
+  #   - https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+  #   - https://github.com/torvalds/linux.git
+  #   - /home/user/local-kernel-repo
+  source: null
+
+  # Optional: Branch or ref to checkout after clone
+  # If not specified, uses repository's default branch
+  # Examples: main, master, linux-6.6.y
+  branch: null
+
 # Deployment configuration (automatic slave setup)
 deployment:
   auto_deploy: true                  # Automatically deploy to slave if not set up
@@ -43,7 +59,7 @@ timeouts:
 disk_management:
   boot_min_free_mb: 500             # Minimum free space in /boot before cleanup
   boot_emergency_mb: 100            # Emergency cleanup threshold
-  keep_test_kernels: 2              # Number of test kernels to keep
+  keep_test_kernels: 1              # Number of test kernels to keep
 
 # Kernel configuration
 kernel_config:
@@ -75,9 +91,9 @@ cleanup:
   verify_before_delete: true       # Triple-check before deletion
 
 # State and Database (per-directory isolation)
-# Default: files stored in current working directory
+# All bisection state and metadata stored in SQLite database
 database_path: bisect.db            # SQLite database file (default: ./bisect.db)
-state_dir: .                        # Directory for metadata/configs (default: current directory)
+state_dir: .                        # Working directory for database (default: current directory)
 
 # Metadata collection
 metadata:
@@ -86,7 +102,7 @@ metadata:
   collect_kernel_config: true       # Include kernel .config in metadata
   collect_packages: true            # Include rpm -qa / dpkg -l
   compress_large_data: true         # Gzip large metadata files
-  # Note: Metadata is stored in state_dir (default: current directory)
+  # Note: All metadata stored in database (no filesystem files)
 
 # Console log collection (boot process logs)
 console_logs:

@@ -492,6 +492,41 @@ get_uptime() {
     cat /proc/uptime | awk '{print int($1)}'
 }
 
+validate_kernel_repo() {
+    local repo_path="${1:-$KERNEL_PATH}"
+
+    echo "Validating kernel repository: $repo_path" >&2
+
+    # Check if directory exists
+    if [ ! -d "$repo_path" ]; then
+        echo "ERROR: Kernel path does not exist: $repo_path" >&2
+        return 1
+    fi
+
+    # Check if it's a git repository
+    if [ ! -d "$repo_path/.git" ]; then
+        echo "ERROR: Not a git repository: $repo_path" >&2
+        return 1
+    fi
+
+    # Check if repository is accessible
+    if ! git -C "$repo_path" rev-parse HEAD >/dev/null 2>&1; then
+        echo "ERROR: Git repository is invalid or corrupted: $repo_path" >&2
+        return 1
+    fi
+
+    # Get repository info
+    local head_commit=$(git -C "$repo_path" rev-parse --short HEAD 2>/dev/null)
+    local branch=$(git -C "$repo_path" rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+    echo "✓ Repository valid" >&2
+    echo "  Path: $repo_path" >&2
+    echo "  Branch: $branch" >&2
+    echo "  HEAD: $head_commit" >&2
+
+    return 0
+}
+
 # Library initialization
 echo "Kernel bisect library loaded ($(date))" >&2
 true

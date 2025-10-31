@@ -83,6 +83,8 @@ class BisectConfig:
         console_collector_type: Console collector type (conserver, ipmi, auto)
         console_hostname: Override hostname for console connection
         console_fallback_ipmi: Fall back to IPMI SOL if conserver fails
+        kernel_repo_source: Git URL or local path to kernel repository (optional)
+        kernel_repo_branch: Branch or ref to checkout (optional)
     """
 
     slave_host: str
@@ -108,6 +110,8 @@ class BisectConfig:
     console_collector_type: str = "auto"
     console_hostname: Optional[str] = None
     console_fallback_ipmi: bool = True
+    kernel_repo_source: Optional[str] = None
+    kernel_repo_branch: Optional[str] = None
 
 
 @dataclass
@@ -285,13 +289,9 @@ class BisectMaster:
         self.good_commit = good_commit
         self.bad_commit = bad_commit
         self.ssh = SSHClient(config.slave_host, config.slave_user)
-        self.state_file = Path(config.state_dir) / "bisect-state.json"
         self.iterations: List[BisectIteration] = []
         self.current_iteration: Optional[BisectIteration] = None
         self.iteration_count = 0
-
-        # Create state directory
-        Path(config.state_dir).mkdir(parents=True, exist_ok=True)
 
         # Initialize state manager and create/load session
         from kbisect.master.state_manager import StateManager
@@ -352,7 +352,7 @@ class BisectMaster:
         return True
 
     def capture_kernel_config(self, kernel_version: str, iteration_id: int) -> bool:
-        """Capture and store kernel config file from slave.
+        """Capture and store kernel config file from slave in database.
 
         Args:
             kernel_version: Kernel version string
@@ -363,33 +363,18 @@ class BisectMaster:
         """
         config_path = f"/boot/config-{kernel_version}"
 
-        # Create local storage directory
-        local_config_dir = Path(self.config.state_dir) / "configs"
-        local_config_dir.mkdir(parents=True, exist_ok=True)
-        local_config_path = local_config_dir / f"config-{kernel_version}"
+        # Download config file content from slave (to memory, not disk)
+        ret, stdout, stderr = self.ssh.run_command(f"cat {shlex.quote(config_path)}", timeout=30)
 
-        # Download config file from slave using scp
-        scp_cmd = [
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            f"{self.config.slave_user}@{self.config.slave_host}:{config_path}",
-            str(local_config_path),
-        ]
-
-        try:
-            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30, check=False)
-            if result.returncode != 0:
-                logger.warning(f"Failed to download kernel config: {result.stderr}")
-                return False
-        except subprocess.TimeoutExpired:
-            logger.warning("Kernel config download timed out")
-            return False
-        except Exception as exc:
-            logger.warning(f"Error downloading kernel config: {exc}")
+        if ret != 0:
+            logger.warning(f"Failed to read kernel config from slave: {stderr}")
             return False
 
-        # Store reference in database
+        if not stdout:
+            logger.warning(f"Kernel config file is empty: {config_path}")
+            return False
+
+        # Store config content directly in database
         metadata_list = self.state.get_session_metadata(self.session_id, "iteration")
         if metadata_list:
             # Find metadata for this iteration
@@ -398,10 +383,12 @@ class BisectMaster:
             ]
             if iteration_metadata:
                 metadata_id = iteration_metadata[0]["metadata_id"]
-                self.state.store_metadata_file(
-                    metadata_id, "kernel_config", str(local_config_path), compressed=False
+                # Store content as bytes in database (compressed)
+                config_content = stdout.encode("utf-8")
+                file_id = self.state.store_metadata_file_content(
+                    metadata_id, "kernel_config", config_content, compress=True
                 )
-                logger.info(f"✓ Captured kernel config: {config_path}")
+                logger.info(f"✓ Captured kernel config in DB (file_id: {file_id}): {config_path}")
                 return True
 
         logger.warning("Could not find metadata record to link kernel config")
@@ -529,6 +516,171 @@ class BisectMaster:
             logger.error(f"Failed to store console log: {exc}")
             return None
 
+    def _prepare_kernel_repo(self) -> Optional[str]:
+        """Prepare kernel repository on master (clone or copy to temp directory).
+
+        Returns:
+            Path to prepared repository on master, or None if preparation failed
+        """
+        if not self.config.kernel_repo_source:
+            logger.debug("No kernel_repo_source configured, skipping repo preparation")
+            return None
+
+        logger.info("Preparing kernel repository on master...")
+        logger.info(f"Source: {self.config.kernel_repo_source}")
+
+        # Create temp directory for repo
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp(prefix="kbisect-repo-")
+        repo_path = Path(temp_dir) / "kernel"
+
+        try:
+            # Check if source is a local path or remote URL
+            source_path = Path(self.config.kernel_repo_source)
+            is_local = source_path.exists() and source_path.is_dir()
+
+            if is_local:
+                # Copy from local path using rsync
+                logger.info(f"Copying local repository from {self.config.kernel_repo_source}...")
+                rsync_cmd = [
+                    "rsync",
+                    "-a",
+                    "--delete",
+                    f"{str(source_path)}/",
+                    f"{str(repo_path)}/",
+                ]
+
+                result = subprocess.run(
+                    rsync_cmd, capture_output=True, text=True, timeout=600, check=False
+                )
+
+                if result.returncode != 0:
+                    logger.error(f"Failed to copy local repository: {result.stderr}")
+                    subprocess.run(["rm", "-rf", temp_dir], check=False)
+                    return None
+
+                logger.info("✓ Local repository copied successfully")
+            else:
+                # Clone from remote URL
+                logger.info(f"Cloning repository from {self.config.kernel_repo_source}...")
+                clone_cmd = ["git", "clone", self.config.kernel_repo_source, str(repo_path)]
+
+                result = subprocess.run(
+                    clone_cmd, capture_output=True, text=True, timeout=3600, check=False
+                )
+
+                if result.returncode != 0:
+                    logger.error(f"Failed to clone repository: {result.stderr}")
+                    subprocess.run(["rm", "-rf", temp_dir], check=False)
+                    return None
+
+                logger.info("✓ Repository cloned successfully")
+
+            # Checkout specified branch if configured
+            if self.config.kernel_repo_branch:
+                logger.info(f"Checking out branch: {self.config.kernel_repo_branch}")
+                result = subprocess.run(
+                    ["git", "-C", str(repo_path), "checkout", self.config.kernel_repo_branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+
+                if result.returncode != 0:
+                    logger.warning(
+                        f"Failed to checkout branch {self.config.kernel_repo_branch}: {result.stderr}"
+                    )
+                else:
+                    logger.info(f"✓ Checked out branch {self.config.kernel_repo_branch}")
+
+            return str(repo_path)
+
+        except subprocess.TimeoutExpired:
+            logger.error("Repository preparation timed out")
+            subprocess.run(["rm", "-rf", temp_dir], check=False)
+            return None
+        except Exception as exc:
+            logger.error(f"Error preparing repository: {exc}")
+            subprocess.run(["rm", "-rf", temp_dir], check=False)
+            return None
+
+    def _transfer_repo_to_slave(self, local_repo_path: str) -> bool:
+        """Transfer kernel repository from master to slave.
+
+        Args:
+            local_repo_path: Path to repository on master
+
+        Returns:
+            True if transfer succeeded, False otherwise
+        """
+        logger.info("Transferring kernel repository to slave...")
+
+        # Remove existing kernel path on slave
+        logger.info(f"Removing existing path on slave: {self.config.slave_kernel_path}")
+        ret, _stdout, stderr = self.ssh.run_command(
+            f"rm -rf {shlex.quote(self.config.slave_kernel_path)}"
+        )
+
+        if ret != 0:
+            logger.warning(f"Failed to remove existing path (may not exist): {stderr}")
+
+        # Create parent directory on slave
+        parent_dir = str(Path(self.config.slave_kernel_path).parent)
+        ret, _stdout, stderr = self.ssh.run_command(f"mkdir -p {shlex.quote(parent_dir)}")
+
+        if ret != 0:
+            logger.error(f"Failed to create parent directory on slave: {stderr}")
+            return False
+
+        # Transfer repository using rsync
+        logger.info("Starting repository transfer (this may take several minutes)...")
+        rsync_cmd = [
+            "rsync",
+            "-avz",
+            "--delete",
+            "-e",
+            "ssh -o StrictHostKeyChecking=no",
+            f"{local_repo_path}/",
+            f"{self.config.slave_user}@{self.config.slave_host}:{self.config.slave_kernel_path}/",
+        ]
+
+        try:
+            result = subprocess.run(
+                rsync_cmd, capture_output=True, text=True, timeout=3600, check=False
+            )
+
+            if result.returncode != 0:
+                logger.error(f"Repository transfer failed: {result.stderr}")
+                return False
+
+            logger.info("✓ Repository transferred successfully")
+
+            # Verify repository exists on slave
+            ret, _stdout, stderr = self.ssh.run_command(
+                f"test -d {shlex.quote(self.config.slave_kernel_path)}/.git"
+            )
+
+            if ret != 0:
+                logger.error("Repository verification failed - .git directory not found on slave")
+                return False
+
+            logger.info("✓ Repository verified on slave")
+            return True
+
+        except subprocess.TimeoutExpired:
+            logger.error("Repository transfer timed out")
+            return False
+        except Exception as exc:
+            logger.error(f"Error transferring repository: {exc}")
+            return False
+        finally:
+            # Cleanup temp directory on master
+            temp_dir = str(Path(local_repo_path).parent)
+            logger.debug(f"Cleaning up temp directory: {temp_dir}")
+            subprocess.run(["rm", "-rf", temp_dir], check=False)
+
     def initialize(self) -> bool:
         """Initialize bisection.
 
@@ -547,6 +699,21 @@ class BisectMaster:
             return False
 
         logger.info("✓ Slave is reachable")
+
+        # Prepare and transfer kernel repository if configured
+        if self.config.kernel_repo_source:
+            logger.info("Kernel repository source configured, preparing...")
+            repo_path = self._prepare_kernel_repo()
+
+            if not repo_path:
+                logger.error("Failed to prepare kernel repository on master")
+                return False
+
+            if not self._transfer_repo_to_slave(repo_path):
+                logger.error("Failed to transfer kernel repository to slave")
+                return False
+
+            logger.info("✓ Kernel repository deployed to slave")
 
         # Initialize protection on slave
         logger.info("Initializing kernel protection on slave...")
@@ -1136,7 +1303,7 @@ class BisectMaster:
         return True
 
     def save_state(self) -> None:
-        """Save bisection state to file."""
+        """Save bisection state to database."""
         state = {
             "good_commit": self.good_commit,
             "bad_commit": self.bad_commit,
@@ -1148,8 +1315,8 @@ class BisectMaster:
             "last_update": datetime.utcnow().isoformat(),
         }
 
-        with self.state_file.open("w") as f:
-            json.dump(state, f, indent=2)
+        # Store state in database
+        self.state.update_session_state(self.session_id, state)
 
     def generate_report(self) -> None:
         """Generate bisection report."""

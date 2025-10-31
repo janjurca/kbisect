@@ -43,6 +43,7 @@ class Session(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="running")
     result_commit: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     config: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON as TEXT
+    session_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Bisection state JSON
 
     # Relationships
     iterations: Mapped[List["Iteration"]] = relationship(
@@ -178,9 +179,9 @@ class Metadata(Base):
 
 
 class MetadataFile(Base):
-    """Metadata file reference model.
+    """Metadata file model with optional embedded content.
 
-    References external files associated with metadata.
+    Stores file content directly in database as BLOB or references external files.
     """
 
     __tablename__ = "metadata_files"
@@ -188,7 +189,8 @@ class MetadataFile(Base):
     file_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     metadata_id: Mapped[int] = mapped_column(Integer, ForeignKey("metadata.metadata_id"), nullable=False)
     file_type: Mapped[str] = mapped_column(String, nullable=False)
-    file_path: Mapped[str] = mapped_column(String, nullable=False)
+    file_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Optional for DB-only storage
+    file_content: Mapped[Optional[bytes]] = mapped_column(BLOB, nullable=True)  # File content as BLOB
     file_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -197,7 +199,8 @@ class MetadataFile(Base):
     metadata: Mapped["Metadata"] = relationship("Metadata", back_populates="files")
 
     def __repr__(self) -> str:
+        storage = "DB" if self.file_content is not None else f"path={self.file_path}"
         return (
             f"<MetadataFile(id={self.file_id}, type={self.file_type}, "
-            f"path={self.file_path})>"
+            f"{storage})>"
         )

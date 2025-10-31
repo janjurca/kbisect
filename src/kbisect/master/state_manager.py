@@ -309,7 +309,7 @@ class StateManager:
 
         Args:
             session_id: Session ID to update
-            **kwargs: Fields to update (end_time, status, result_commit)
+            **kwargs: Fields to update (end_time, status, result_commit, session_state)
 
         Raises:
             DatabaseError: If update fails
@@ -324,7 +324,7 @@ class StateManager:
                 return
 
             # Update allowed fields
-            valid_fields = {"end_time", "status", "result_commit"}
+            valid_fields = {"end_time", "status", "result_commit", "session_state"}
             for field, value in kwargs.items():
                 if field in valid_fields:
                     setattr(db_session, field, value)
@@ -336,6 +336,64 @@ class StateManager:
             msg = f"Failed to update session: {exc}"
             logger.error(msg)
             raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def update_session_state(self, session_id: int, state_dict: Dict[str, Any]) -> None:
+        """Update session state JSON.
+
+        Args:
+            session_id: Session ID
+            state_dict: State dictionary to store
+
+        Raises:
+            DatabaseError: If update fails
+        """
+        session = self.Session()
+        try:
+            stmt = select(SessionModel).where(SessionModel.session_id == session_id)
+            db_session = session.execute(stmt).scalar_one_or_none()
+
+            if not db_session:
+                logger.warning(f"Session {session_id} not found for state update")
+                return
+
+            # Convert state to JSON
+            db_session.session_state = json.dumps(state_dict)
+            session.commit()
+
+            logger.debug(f"Updated session state for session {session_id}")
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to update session state: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def get_session_state(self, session_id: int) -> Optional[Dict[str, Any]]:
+        """Get session state JSON.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            State dictionary or None if not found
+        """
+        session = self.Session()
+        try:
+            stmt = select(SessionModel).where(SessionModel.session_id == session_id)
+            db_session = session.execute(stmt).scalar_one_or_none()
+
+            if not db_session or not db_session.session_state:
+                return None
+
+            return json.loads(db_session.session_state)
+
+        except Exception as exc:
+            logger.error(f"Failed to get session state: {exc}")
+            return None
         finally:
             session.close()
 
@@ -893,6 +951,96 @@ class StateManager:
         except Exception as exc:
             session.rollback()
             msg = f"Failed to store metadata file: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def store_metadata_file_content(
+        self, metadata_id: int, file_type: str, content: bytes, compress: bool = True
+    ) -> int:
+        """Store metadata file content directly in database.
+
+        Args:
+            metadata_id: Metadata ID
+            file_type: Type of file
+            content: File content as bytes
+            compress: Whether to compress content (default: True)
+
+        Returns:
+            File ID
+
+        Raises:
+            DatabaseError: If file storage fails
+        """
+        session = self.Session()
+        try:
+            # Optionally compress content
+            file_content = content
+            if compress:
+                file_content = gzip.compress(content)
+
+            # Calculate hash and size
+            file_hash = hashlib.sha256(content).hexdigest()
+            file_size = len(content)
+
+            new_file = MetadataFile(
+                metadata_id=metadata_id,
+                file_type=file_type,
+                file_path=None,  # No file path for DB-only storage
+                file_content=file_content,
+                file_hash=file_hash,
+                file_size=file_size,
+                compressed=compress,
+            )
+
+            session.add(new_file)
+            session.commit()
+            file_id = new_file.file_id
+
+            logger.debug(
+                f"Stored {file_type} file in DB (file_id: {file_id}, "
+                f"size: {file_size} bytes, compressed: {compress})"
+            )
+            return file_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to store metadata file content: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def get_metadata_file_content(self, file_id: int) -> Optional[bytes]:
+        """Get metadata file content from database.
+
+        Args:
+            file_id: File ID
+
+        Returns:
+            File content as bytes, or None if not found
+
+        Raises:
+            DatabaseError: If file retrieval fails
+        """
+        session = self.Session()
+        try:
+            stmt = select(MetadataFile).where(MetadataFile.file_id == file_id)
+            file_record = session.execute(stmt).scalar_one_or_none()
+
+            if not file_record or not file_record.file_content:
+                return None
+
+            # Decompress if needed
+            content = file_record.file_content
+            if file_record.compressed:
+                content = gzip.decompress(content)
+
+            return content
+
+        except Exception as exc:
+            msg = f"Failed to get metadata file content: {exc}"
             logger.error(msg)
             raise DatabaseError(msg) from exc
         finally:
