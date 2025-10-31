@@ -37,11 +37,9 @@ kernel_repo:
   branch: null
 
 # Deployment configuration (automatic slave setup)
+# Note: Slave verification always happens before bisection
 deployment:
   auto_deploy: true                  # Automatically deploy to slave if not set up
-  verify_before_bisect: true         # Verify slave setup before starting bisection
-  auto_update: false                 # Auto-update scripts on slave before each run
-  rsync_options: "-avz --delete"     # Rsync options for deployment
 
 # IPMI configuration (for power control and recovery)
 ipmi:
@@ -55,12 +53,6 @@ timeouts:
   test: 600                          # Test timeout
   build: 1800                        # Build timeout (30 minutes)
 
-# Disk space management
-disk_management:
-  boot_min_free_mb: 500             # Minimum free space in /boot before cleanup
-  boot_emergency_mb: 100            # Emergency cleanup threshold
-  keep_test_kernels: 1              # Number of test kernels to keep
-
 # Kernel configuration
 kernel_config:
   # Path to base .config file (optional)
@@ -71,24 +63,14 @@ kernel_config:
   # If both config_file and use_running_config are set, config_file takes precedence
   use_running_config: false
 
-# Kernel protection
-protection:
-  auto_lock_current_kernel: true    # Lock current kernel at init
-  verify_protected_after_cleanup: true  # Verify protection after cleanup
-
 # Test configuration
-tests:
-  - type: boot                      # Boot success test (always runs)
-
-  - type: custom                    # Custom test script
-    path: /root/kernel_build_and_install/reproducers/my-test.sh
-    enabled: false
-
-# Cleanup strategy
-cleanup:
-  mode: aggressive                  # aggressive | conservative
-  only_delete_bisect_tagged: true  # Only delete kernels tagged with -bisect-
-  verify_before_delete: true       # Triple-check before deletion
+# Note: Current kernel is always protected and cannot be deleted during cleanup
+# Boot test: Just checks if kernel boots successfully
+# Custom test: Runs a custom test script after successful boot
+test:
+  type: boot                        # "boot" or "custom"
+  # If type is "custom", specify script path:
+  # script: /root/reproducers/my-test.sh
 
 # State and Database (per-directory isolation)
 # All bisection state and metadata stored in SQLite database
@@ -96,13 +78,13 @@ database_path: bisect.db            # SQLite database file (default: ./bisect.db
 state_dir: .                        # Working directory for database (default: current directory)
 
 # Metadata collection
+# Note: Compression is always enabled for efficient storage
+# Note: Package counts are always included in baseline metadata
 metadata:
   collect_baseline: true            # Collect system metadata at session start
   collect_per_iteration: true       # Collect kernel metadata per iteration
   collect_kernel_config: true       # Include kernel .config in metadata
-  collect_packages: true            # Include rpm -qa / dpkg -l
-  compress_large_data: true         # Gzip large metadata files
-  # Note: All metadata stored in database (no filesystem files)
+  # All metadata stored in database (no filesystem files)
 
 # Console log collection (boot process logs)
 console_logs:

@@ -5,6 +5,8 @@ Handles copying scripts, installing services, and initializing the slave machine
 """
 
 import logging
+import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -16,7 +18,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_DEPLOY_PATH = "/root/kernel-bisect/lib"
 DEFAULT_STATE_DIR = "/var/lib/kernel-bisect"
 DEFAULT_SSH_TIMEOUT = 30
-DEFAULT_RSYNC_OPTIONS = "-avz"
 
 
 class DeploymentError(Exception):
@@ -27,8 +28,8 @@ class SSHError(DeploymentError):
     """Exception raised when SSH operations fail."""
 
 
-class RsyncError(DeploymentError):
-    """Exception raised when rsync operations fail."""
+class TransferError(DeploymentError):
+    """Exception raised when file transfer operations fail."""
 
 
 class SlaveDeployer:
@@ -110,42 +111,54 @@ class SlaveDeployer:
             logger.error(msg)
             raise SSHError(msg) from exc
 
-    def _rsync_to_slave(
-        self, local_path: str, remote_path: str, options: str = DEFAULT_RSYNC_OPTIONS
-    ) -> bool:
-        """Rsync files to slave.
+    def _copy_to_slave(self, local_path: str, remote_path: str) -> bool:
+        """Copy files to slave using scp.
 
         Args:
             local_path: Local file or directory path
             remote_path: Remote destination path
-            options: Rsync options string
 
         Returns:
-            True if rsync succeeded, False otherwise
+            True if copy succeeded, False otherwise
 
         Raises:
-            RsyncError: If rsync fails to execute
+            TransferError: If file transfer fails to execute
         """
-        rsync_cmd = [
-            "rsync",
-            *options.split(),
-            "--rsync-path",
-            f"mkdir -p $(dirname {remote_path}) && rsync",
-            local_path,
-            f"{self.slave_user}@{self.slave_host}:{remote_path}",
-        ]
-
         try:
-            result = subprocess.run(rsync_cmd, capture_output=True, text=True, check=False)
+            # Step 1: Create remote directory structure
+            remote_dir = os.path.dirname(remote_path)
+            ret, _, stderr = self._ssh_command(f"mkdir -p {shlex.quote(remote_dir)}")
+            if ret != 0:
+                logger.error(f"Failed to create remote directory: {stderr}")
+                return False
+
+            # Step 2: Copy file with scp
+            scp_cmd = [
+                "scp",
+                "-p",  # Preserve modification times and modes
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "ConnectTimeout=10",
+                local_path,
+                f"{self.slave_user}@{self.slave_host}:{remote_path}",
+            ]
+
+            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60, check=False)
             if result.returncode == 0:
                 return True
 
-            logger.error(f"Rsync failed: {result.stderr}")
+            logger.error(f"SCP failed: {result.stderr}")
             return False
-        except Exception as exc:
-            msg = f"Rsync error: {exc}"
+
+        except subprocess.TimeoutExpired:
+            msg = "File transfer timed out"
             logger.error(msg)
-            raise RsyncError(msg) from exc
+            raise TransferError(msg)
+        except Exception as exc:
+            msg = f"File transfer error: {exc}"
+            logger.error(msg)
+            raise TransferError(msg) from exc
 
     def check_connectivity(self) -> bool:
         """Check if slave is reachable via SSH.
@@ -226,12 +239,12 @@ class SlaveDeployer:
 
         # Copy library file
         try:
-            if not self._rsync_to_slave(
+            if not self._copy_to_slave(
                 str(library_file), f"{self.deploy_path}/bisect-functions.sh"
             ):
                 logger.error("Failed to copy library file")
                 return False
-        except RsyncError:
+        except TransferError:
             return False
 
         # Make library executable

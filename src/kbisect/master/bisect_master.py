@@ -7,6 +7,7 @@ Orchestrates the kernel bisection process across master and slave machines.
 import json
 import logging
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -541,26 +542,29 @@ class BisectMaster:
             is_local = source_path.exists() and source_path.is_dir()
 
             if is_local:
-                # Copy from local path using rsync
+                # Copy from local path using Python shutil
                 logger.info(f"Copying local repository from {self.config.kernel_repo_source}...")
-                rsync_cmd = [
-                    "rsync",
-                    "-a",
-                    "--delete",
-                    f"{str(source_path)}/",
-                    f"{str(repo_path)}/",
-                ]
 
-                result = subprocess.run(
-                    rsync_cmd, capture_output=True, text=True, timeout=600, check=False
-                )
+                try:
+                    # Remove destination first if it exists (simulates rsync --delete)
+                    if repo_path.exists():
+                        shutil.rmtree(repo_path)
 
-                if result.returncode != 0:
-                    logger.error(f"Failed to copy local repository: {result.stderr}")
+                    # Copy entire directory tree, preserving symlinks
+                    shutil.copytree(
+                        source_path,
+                        repo_path,
+                        symlinks=True,
+                        ignore_dangling_symlinks=True,
+                        dirs_exist_ok=False,
+                    )
+
+                    logger.info("✓ Local repository copied successfully")
+
+                except (OSError, shutil.Error) as exc:
+                    logger.error(f"Failed to copy local repository: {exc}")
                     subprocess.run(["rm", "-rf", temp_dir], check=False)
                     return None
-
-                logger.info("✓ Local repository copied successfully")
             else:
                 # Clone from remote URL
                 logger.info(f"Cloning repository from {self.config.kernel_repo_source}...")
@@ -634,21 +638,28 @@ class BisectMaster:
             logger.error(f"Failed to create parent directory on slave: {stderr}")
             return False
 
-        # Transfer repository using rsync
+        # Transfer repository using scp
         logger.info("Starting repository transfer (this may take several minutes)...")
-        rsync_cmd = [
-            "rsync",
-            "-avz",
-            "--delete",
-            "-e",
-            "ssh -o StrictHostKeyChecking=no",
-            f"{local_repo_path}/",
+
+        # Use scp with recursive and compression options
+        # Note: We copy the contents of local_repo_path into slave_kernel_path
+        # by using "source/." which copies contents without creating nested dir
+        scp_cmd = [
+            "scp",
+            "-r",  # Recursive for directory
+            "-p",  # Preserve modification times and modes
+            "-C",  # Enable compression
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "ConnectTimeout=10",
+            f"{local_repo_path}/.",  # /. copies contents without creating parent
             f"{self.config.slave_user}@{self.config.slave_host}:{self.config.slave_kernel_path}/",
         ]
 
         try:
             result = subprocess.run(
-                rsync_cmd, capture_output=True, text=True, timeout=3600, check=False
+                scp_cmd, capture_output=True, text=True, timeout=3600, check=False
             )
 
             if result.returncode != 0:

@@ -583,9 +583,6 @@ ipmi:
 # Deployment settings
 deployment:
   auto_deploy: true               # Auto-deploy to slave if not set up
-  verify_before_bisect: true      # Verify slave before starting
-  auto_update: false              # Auto-update scripts on slave before each run
-  rsync_options: "-avz --delete"  # Rsync options for deployment
 
 # Timeouts (in seconds)
 timeouts:
@@ -1125,11 +1122,6 @@ ssh root@slave 'source /root/kernel-bisect/lib/bisect-functions.sh && verify_pro
 2. **SSH not working:**
    ```bash
    ssh root@<slave-ip> 'mkdir -p /root/kernel-bisect/lib'
-   ```
-
-3. **rsync not installed:**
-   ```bash
-   sudo dnf install rsync
    ```
 
 ### Console log collection not working

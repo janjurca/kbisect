@@ -106,8 +106,10 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
         test_timeout=config_dict.get("timeouts", {}).get("test", 600),
         build_timeout=config_dict.get("timeouts", {}).get("build", 1800),
         test_type=getattr(args, "test_type", None)
-        or config_dict.get("tests", [{}])[0].get("type", "boot"),
-        test_script=getattr(args, "test_script", None),
+        or config_dict.get("test", {}).get("type")
+        or config_dict.get("tests", [{}])[0].get("type", "boot"),  # backward compat
+        test_script=getattr(args, "test_script", None)
+        or config_dict.get("test", {}).get("script"),
         state_dir=config_dict.get("state_dir", "."),
         db_path=config_dict.get("database_path", "bisect.db"),
         kernel_config_file=kernel_config_file,
@@ -119,6 +121,8 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
         console_collector_type=console_collector_type,
         console_hostname=console_logs_config.get("hostname"),
         console_fallback_ipmi=console_logs_config.get("fallback_to_ipmi", True),
+        kernel_repo_source=config_dict.get("kernel_repo", {}).get("source"),
+        kernel_repo_branch=config_dict.get("kernel_repo", {}).get("branch"),
     )
 
 
@@ -258,7 +262,10 @@ def cmd_start(args: argparse.Namespace) -> int:
                 # Determine what to mark based on error message
                 if "Boot timeout" in last_iteration.error_message or "Kernel panic" in last_iteration.error_message:
                     # Determine mark type based on original test type
-                    test_type = config_dict.get("tests", [{}])[0].get("type", "boot")
+                    test_type = (
+                        config_dict.get("test", {}).get("type")
+                        or config_dict.get("tests", [{}])[0].get("type", "boot")  # backward compat
+                    )
                     if test_type == "boot":
                         mark_as = "bad"
                         print("  Boot test mode: marking as BAD")
@@ -598,6 +605,159 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_metadata(args: argparse.Namespace) -> int:
+    """Manage metadata.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    state = StateManager()
+
+    if args.metadata_command == "list":
+        # List all metadata
+        session_id = args.session_id
+        collection_type = args.type
+
+        # Get session if not specified
+        if not session_id:
+            session = state.get_latest_session()
+            if session:
+                session_id = session.session_id
+            else:
+                print("No bisection session found")
+                return 1
+
+        metadata_list = state.get_session_metadata(session_id, collection_type=collection_type)
+
+        if not metadata_list:
+            print("No metadata found")
+            return 0
+
+        print("=== Metadata ===\n")
+        print(
+            f"{'ID':<6} {'Session':<8} {'Iteration':<10} {'Type':<12} {'Collection Time':<20}"
+        )
+        print("-" * 70)
+
+        for meta in metadata_list:
+            iter_str = str(meta["iteration_id"]) if meta["iteration_id"] else "N/A"
+            timestamp = meta["collection_time"][:19] if meta["collection_time"] else "N/A"
+            print(
+                f"{meta['metadata_id']:<6} {meta['session_id']:<8} "
+                f"{iter_str:<10} {meta['collection_type']:<12} {timestamp:<20}"
+            )
+
+    elif args.metadata_command == "show":
+        # Show specific metadata
+        metadata = state.get_metadata(args.metadata_id)
+
+        if not metadata:
+            print(f"Metadata {args.metadata_id} not found")
+            return 1
+
+        print(f"=== Metadata {args.metadata_id} ===\n")
+        print(f"Session ID:        {metadata['session_id']}")
+        print(f"Iteration ID:      {metadata['iteration_id'] or 'N/A'}")
+        print(f"Collection Type:   {metadata['collection_type']}")
+        print(f"Collection Time:   {metadata['collection_time']}")
+        print(f"Metadata Hash:     {metadata['metadata_hash'][:16]}..." if metadata['metadata_hash'] else "")
+        print("\n" + "=" * 80 + "\n")
+
+        # Pretty print metadata JSON
+        import json
+        print(json.dumps(metadata["metadata"], indent=2))
+
+        # Show associated files
+        files = state.get_metadata_files(args.metadata_id)
+        if files:
+            print("\n" + "=" * 80)
+            print("Associated Files:")
+            print("=" * 80 + "\n")
+            for f in files:
+                storage = "Database" if f.get("file_path") is None else f["file_path"]
+                size_kb = f["file_size"] / 1024 if f.get("file_size") else 0
+                print(f"  File ID: {f['file_id']}")
+                print(f"  Type:    {f['file_type']}")
+                print(f"  Size:    {size_kb:.1f} KB")
+                print(f"  Storage: {storage}")
+                print(f"  Hash:    {f['file_hash'][:16]}..." if f.get('file_hash') else "")
+                print()
+
+    elif args.metadata_command == "files":
+        # List files for specific metadata
+        files = state.get_metadata_files(args.metadata_id)
+
+        if not files:
+            print(f"No files found for metadata {args.metadata_id}")
+            return 0
+
+        print(f"=== Files for Metadata {args.metadata_id} ===\n")
+        print(f"{'File ID':<8} {'Type':<15} {'Size':<12} {'Compressed':<12} {'Storage':<20}")
+        print("-" * 80)
+
+        for f in files:
+            size_kb = f["file_size"] / 1024 if f.get("file_size") else 0
+            compressed = "Yes" if f.get("compressed") else "No"
+            storage = "Database" if f.get("file_path") is None else "Filesystem"
+            print(
+                f"{f['file_id']:<8} {f['file_type']:<15} "
+                f"{size_kb:>7.1f} KB   {compressed:<12} {storage:<20}"
+            )
+
+        print("\nExport file: kbisect metadata export-file <file-id>")
+
+    elif args.metadata_command == "export-file":
+        # Export file content to disk
+        content = state.get_metadata_file_content(args.file_id)
+
+        if content is None:
+            print(f"File {args.file_id} not found or has no content")
+            return 1
+
+        output_path = Path(args.output) if args.output else Path(f"metadata-file-{args.file_id}")
+
+        try:
+            with output_path.open("wb") as f:
+                f.write(content)
+            print(f"File {args.file_id} exported to: {output_path}")
+            size_kb = len(content) / 1024
+            print(f"Size: {size_kb:.1f} KB (decompressed)")
+        except Exception as exc:
+            print(f"Failed to export file: {exc}")
+            return 1
+
+    elif args.metadata_command == "export":
+        # Export metadata JSON to file
+        metadata = state.get_metadata(args.metadata_id)
+
+        if not metadata:
+            print(f"Metadata {args.metadata_id} not found")
+            return 1
+
+        output_path = Path(args.output) if args.output else Path(f"metadata-{args.metadata_id}.json")
+
+        try:
+            import json
+
+            with output_path.open("w") as f:
+                if args.format == "json":
+                    json.dump(metadata["metadata"], f, indent=2)
+                else:  # yaml
+                    import yaml
+                    yaml.dump(metadata["metadata"], f, default_flow_style=False)
+
+            print(f"Metadata {args.metadata_id} exported to: {output_path}")
+        except Exception as exc:
+            print(f"Failed to export metadata: {exc}")
+            return 1
+
+    state.close()
+    return 0
+
+
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Deploy slave components.
 
@@ -781,6 +941,52 @@ def create_parser() -> argparse.ArgumentParser:
     parser_logs_export.add_argument("log_id", type=int, help="Log ID to export")
     parser_logs_export.add_argument("output_file", help="Output file path")
 
+    # metadata command
+    parser_metadata = subparsers.add_parser("metadata", help="Manage metadata")
+    metadata_subparsers = parser_metadata.add_subparsers(
+        dest="metadata_command", help="Metadata commands"
+    )
+
+    # metadata list
+    parser_metadata_list = metadata_subparsers.add_parser("list", help="List all metadata")
+    parser_metadata_list.add_argument("--session-id", type=int, help="Filter by session ID")
+    parser_metadata_list.add_argument(
+        "--type", choices=["baseline", "iteration"], help="Filter by collection type"
+    )
+
+    # metadata show
+    parser_metadata_show = metadata_subparsers.add_parser(
+        "show", help="Show specific metadata details"
+    )
+    parser_metadata_show.add_argument("metadata_id", type=int, help="Metadata ID to display")
+
+    # metadata files
+    parser_metadata_files = metadata_subparsers.add_parser(
+        "files", help="List files for specific metadata"
+    )
+    parser_metadata_files.add_argument("metadata_id", type=int, help="Metadata ID")
+
+    # metadata export-file
+    parser_metadata_export_file = metadata_subparsers.add_parser(
+        "export-file", help="Export metadata file (e.g., kernel config) to disk"
+    )
+    parser_metadata_export_file.add_argument("file_id", type=int, help="File ID to export")
+    parser_metadata_export_file.add_argument(
+        "--output", "-o", help="Output file path (default: metadata-file-<id>)"
+    )
+
+    # metadata export
+    parser_metadata_export = metadata_subparsers.add_parser(
+        "export", help="Export metadata JSON to file"
+    )
+    parser_metadata_export.add_argument("metadata_id", type=int, help="Metadata ID to export")
+    parser_metadata_export.add_argument(
+        "--output", "-o", help="Output file path (default: metadata-<id>.json)"
+    )
+    parser_metadata_export.add_argument(
+        "--format", choices=["json", "yaml"], default="json", help="Output format"
+    )
+
     return parser
 
 
@@ -813,6 +1019,8 @@ def main() -> int:
             return cmd_deploy(args)
         if args.command == "logs":
             return cmd_logs(args)
+        if args.command == "metadata":
+            return cmd_metadata(args)
 
         parser.print_help()
         return 1
