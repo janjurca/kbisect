@@ -49,7 +49,7 @@ class Session(Base):
     iterations: Mapped[List["Iteration"]] = relationship(
         "Iteration", back_populates="session", cascade="all, delete-orphan"
     )
-    metadata: Mapped[List["Metadata"]] = relationship(
+    metadata_records: Mapped[List["Metadata"]] = relationship(
         "Metadata", back_populates="session", cascade="all, delete-orphan"
     )
 
@@ -166,7 +166,7 @@ class Metadata(Base):
     metadata_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     # Relationships
-    session: Mapped["Session"] = relationship("Session", back_populates="metadata")
+    session: Mapped["Session"] = relationship("Session", back_populates="metadata_records")
     files: Mapped[List["MetadataFile"]] = relationship(
         "MetadataFile", back_populates="metadata", cascade="all, delete-orphan"
     )
