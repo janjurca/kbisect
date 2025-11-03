@@ -168,7 +168,7 @@ class Metadata(Base):
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="metadata_records")
     files: Mapped[List["MetadataFile"]] = relationship(
-        "MetadataFile", back_populates="metadata", cascade="all, delete-orphan"
+        "MetadataFile", back_populates="metadata_record", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
@@ -196,7 +196,7 @@ class MetadataFile(Base):
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Relationships
-    metadata: Mapped["Metadata"] = relationship("Metadata", back_populates="files")
+    metadata_record: Mapped["Metadata"] = relationship("Metadata", back_populates="files")
 
     def __repr__(self) -> str:
         storage = "DB" if self.file_content is not None else f"path={self.file_path}"
