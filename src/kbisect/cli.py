@@ -6,6 +6,7 @@ Main command-line interface for automated kernel bisection.
 
 import argparse
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -810,6 +811,47 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_init_config(args: argparse.Namespace) -> int:
+    """Generate example configuration file.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    # Locate the example config file in the package
+    config_dir = Path(__file__).parent / "config"
+    source_file = config_dir / "bisect.conf.example"
+
+    if not source_file.exists():
+        print(f"Error: Example config file not found at {source_file}")
+        print("This might indicate a corrupted installation.")
+        return 1
+
+    # Determine output file path
+    output_file = Path(args.output) if args.output else Path("bisect.yaml")
+
+    # Check if output file already exists
+    if output_file.exists() and not args.force:
+        response = input(f"File '{output_file}' already exists. Overwrite? [y/N]: ")
+        if response.lower() not in ["y", "yes"]:
+            print("Aborted.")
+            return 1
+
+    # Copy the example config
+    try:
+        shutil.copy(source_file, output_file)
+        print(f"✓ Example configuration created: {output_file}")
+        print("\nNext steps:")
+        print(f"  1. Edit {output_file} with your slave configuration")
+        print("  2. Run: kbisect init <good-commit> <bad-commit>")
+        return 0
+    except Exception as exc:
+        print(f"Error copying config file: {exc}")
+        return 1
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create argument parser.
 
@@ -915,6 +957,17 @@ def create_parser() -> argparse.ArgumentParser:
         "--update-only", action="store_true", help="Only update library, do not full deploy"
     )
 
+    # init-config command
+    parser_init_config = subparsers.add_parser(
+        "init-config", help="Generate example configuration file"
+    )
+    parser_init_config.add_argument(
+        "--output", "-o", help="Output file path (default: bisect.yaml)"
+    )
+    parser_init_config.add_argument(
+        "--force", "-f", action="store_true", help="Overwrite existing file without prompting"
+    )
+
     # logs command
     parser_logs = subparsers.add_parser("logs", help="Manage build logs")
     logs_subparsers = parser_logs.add_subparsers(dest="logs_command", help="Log commands")
@@ -1017,6 +1070,8 @@ def main() -> int:
             return cmd_ipmi(args)
         if args.command == "deploy":
             return cmd_deploy(args)
+        if args.command == "init-config":
+            return cmd_init_config(args)
         if args.command == "logs":
             return cmd_logs(args)
         if args.command == "metadata":
