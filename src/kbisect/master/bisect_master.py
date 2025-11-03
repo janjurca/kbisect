@@ -620,9 +620,6 @@ class BisectMaster:
             "scp",
             "-r",  # Recursive for directory
             "-p",  # Preserve modification times and modes
-            "-C",  # Enable compression
-            "-o",
-            "StrictHostKeyChecking=no",
             "-o",
             "ConnectTimeout=10",
             f"{local_repo_path}/.",  # /. copies contents without creating parent
@@ -630,6 +627,7 @@ class BisectMaster:
         ]
 
         try:
+            logger.debug(f"SCP command: {' '.join(shlex.quote(arg) for arg in scp_cmd)}")
             result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=3600, check=False)
 
             if result.returncode != 0:
