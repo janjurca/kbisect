@@ -610,25 +610,24 @@ class BisectMaster:
             logger.error(f"Failed to create target directory on slave: {stderr}")
             return False
 
-        # Transfer repository using scp
+        # Transfer repository using rsync
         logger.info("Starting repository transfer (this may take several minutes)...")
 
-        # Use scp with recursive and compression options
+        # Use rsync with archive mode and compression for faster transfers
         # Note: We copy the contents of local_repo_path into slave_kernel_path
-        # by using "source/." which copies contents without creating nested dir
-        scp_cmd = [
-            "scp",
-            "-r",  # Recursive for directory
-            "-p",  # Preserve modification times and modes
-            "-o",
-            "ConnectTimeout=10",
-            f"{local_repo_path}/.",  # /. copies contents without creating parent
+        # by using trailing slash on source which copies contents without creating nested dir
+        rsync_cmd = [
+            "rsync",
+            "-avz",  # Archive mode (preserves permissions, times, symlinks) + verbose + compression
+            "-e",
+            "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10",
+            f"{local_repo_path}/",  # Trailing slash copies contents without creating parent
             f"{self.config.slave_user}@{self.config.slave_host}:{self.config.slave_kernel_path}/",
         ]
 
         try:
-            logger.debug(f"SCP command: {' '.join(shlex.quote(arg) for arg in scp_cmd)}")
-            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=3600, check=False)
+            logger.info(f"rsync command: {' '.join(shlex.quote(arg) for arg in rsync_cmd)}")
+            result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=3600, check=False)
 
             if result.returncode != 0:
                 logger.error(f"Repository transfer failed: {result.stderr}")
@@ -720,7 +719,7 @@ class BisectMaster:
         Returns:
             Commit SHA or None if bisection complete
         """
-        ret, stdout, stderr = self.ssh.run_command(f"cd {self.config.slave_kernel_path} && git bisect start {self.bad_commit} {self.good_commit} 2>&1 || git rev-parse HEAD")
+        ret, stdout, stderr = self.ssh.run_command(f"cd {self.config.slave_kernel_path} && git bisect start {self.bad_commit} {self.good_commit} >/dev/null 2>&1 && git rev-parse HEAD")
 
         if ret != 0:
             logger.error(f"Failed to get next commit: {stderr}")
@@ -1233,14 +1232,31 @@ class BisectMaster:
         self.generate_report()
         return True
 
+    def _iteration_to_dict(self, iteration: BisectIteration) -> dict:
+        """Convert BisectIteration to JSON-serializable dict.
+
+        Args:
+            iteration: BisectIteration object to convert
+
+        Returns:
+            Dictionary with enum values converted to strings
+        """
+        data = asdict(iteration)
+        # Convert enums to their string values for JSON serialization
+        if isinstance(data.get('state'), BisectState):
+            data['state'] = data['state'].value
+        if data.get('result') and isinstance(data['result'], TestResult):
+            data['result'] = data['result'].value
+        return data
+
     def save_state(self) -> None:
         """Save bisection state to database."""
         state = {
             "good_commit": self.good_commit,
             "bad_commit": self.bad_commit,
             "iteration_count": self.iteration_count,
-            "current_iteration": (asdict(self.current_iteration) if self.current_iteration else None),
-            "iterations": [asdict(it) for it in self.iterations],
+            "current_iteration": (self._iteration_to_dict(self.current_iteration) if self.current_iteration else None),
+            "iterations": [self._iteration_to_dict(it) for it in self.iterations],
             "last_update": datetime.utcnow().isoformat(),
         }
 

@@ -132,23 +132,21 @@ class SlaveDeployer:
                 logger.error(f"Failed to create remote directory: {stderr}")
                 return False
 
-            # Step 2: Copy file with scp
-            scp_cmd = [
-                "scp",
-                "-p",  # Preserve modification times and modes
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "ConnectTimeout=10",
+            # Step 2: Copy file with rsync
+            rsync_cmd = [
+                "rsync",
+                "-az",  # Archive mode (preserves permissions, times, etc.) + compression
+                "-e",
+                "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10",
                 local_path,
                 f"{self.slave_user}@{self.slave_host}:{remote_path}",
             ]
 
-            result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60, check=False)
+            result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=60, check=False)
             if result.returncode == 0:
                 return True
 
-            logger.error(f"SCP failed: {result.stderr}")
+            logger.error(f"rsync failed: {result.stderr}")
             return False
 
         except subprocess.TimeoutExpired:

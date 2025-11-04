@@ -48,6 +48,13 @@ EOF
     chmod 600 "$BISECT_DIR/protected-kernels.list" "$BISECT_DIR/safe-kernel.info"
 
     echo "Protected kernel: $current_kernel" >&2
+
+    # Install build dependencies
+    if ! install_build_deps; then
+        echo "Warning: Failed to install all build dependencies" >&2
+        echo "Kernel builds may fail. Please install required packages manually." >&2
+    fi
+
     return 0
 }
 
@@ -94,6 +101,104 @@ check_disk_space() {
 
 get_disk_space() {
     df -BM /boot | awk 'NR==2 {gsub(/M/,"",$4); print $4}'
+}
+
+# ============================================================================
+# BUILD DEPENDENCIES FUNCTIONS
+# ============================================================================
+
+install_build_deps() {
+    echo "Checking and installing kernel build dependencies..." >&2
+
+    # Detect distribution
+    local distro_id=""
+    if [ -f /etc/os-release ]; then
+        distro_id=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr '[:upper:]' '[:lower:]')
+    fi
+
+    # Determine package manager and packages based on distribution
+    case "$distro_id" in
+        rhel|centos|fedora|rocky|almalinux)
+            echo "Detected RPM-based distribution: $distro_id" >&2
+
+            # Try dnf first (newer RHEL/Fedora), fall back to yum
+            local pkg_manager=""
+            if command -v dnf &> /dev/null; then
+                pkg_manager="dnf"
+            elif command -v yum &> /dev/null; then
+                pkg_manager="yum"
+            else
+                echo "Error: No package manager found (dnf/yum)" >&2
+                return 1
+            fi
+
+            # Install build dependencies
+            echo "Installing build dependencies with $pkg_manager..." >&2
+            $pkg_manager install -y \
+                make \
+                gcc \
+                flex \
+                bison \
+                elfutils-libelf-devel \
+                openssl-devel \
+                bc \
+                ncurses-devel \
+                perl \
+                dwarves \
+                >&2 2>&1
+
+            if [ $? -ne 0 ]; then
+                echo "Warning: Some packages may have failed to install" >&2
+            fi
+            ;;
+
+        debian|ubuntu)
+            echo "Detected DEB-based distribution: $distro_id" >&2
+
+            # Update package lists first
+            echo "Updating package lists..." >&2
+            apt-get update -y >&2 2>&1
+
+            # Install build dependencies
+            echo "Installing build dependencies with apt..." >&2
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                build-essential \
+                flex \
+                bison \
+                libelf-dev \
+                libssl-dev \
+                bc \
+                libncurses-dev \
+                dwarves \
+                >&2 2>&1
+
+            if [ $? -ne 0 ]; then
+                echo "Warning: Some packages may have failed to install" >&2
+            fi
+            ;;
+
+        *)
+            echo "Warning: Unknown distribution '$distro_id' - attempting generic installation" >&2
+            echo "You may need to manually install: flex, bison, gcc, make, libelf-dev, libssl-dev, bc" >&2
+            return 1
+            ;;
+    esac
+
+    # Verify critical tools are available
+    local missing_tools=""
+    for tool in flex bison gcc make; do
+        if ! command -v $tool &> /dev/null; then
+            missing_tools="$missing_tools $tool"
+        fi
+    done
+
+    if [ -n "$missing_tools" ]; then
+        echo "Error: Critical build tools still missing:$missing_tools" >&2
+        return 1
+    fi
+
+    echo "✓ Build dependencies installed successfully" >&2
+    return 0
 }
 
 # ============================================================================
