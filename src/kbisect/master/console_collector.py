@@ -86,6 +86,22 @@ class ConsoleCollector(ABC):
             return time.time() - self.start_time
         return None
 
+    def get_buffer_stats(self) -> dict:
+        """Get current buffer statistics.
+
+        Returns:
+            Dictionary with buffer statistics (lines, approximate size)
+        """
+        return {"lines": len(self.buffer), "max_lines": self.max_buffer_lines}
+
+    @abstractmethod
+    def get_and_clear_buffer(self) -> str:
+        """Get current buffer content and clear it (for streaming).
+
+        Returns:
+            Current buffered content as string, buffer is cleared after reading
+        """
+
 
 class ConserverCollector(ConsoleCollector):
     """Conserver-based console log collector.
@@ -249,6 +265,19 @@ class ConserverCollector(ConsoleCollector):
         """
         return self.is_active and self.proc is not None and self.proc.poll() is None
 
+    def get_and_clear_buffer(self) -> str:
+        """Get current buffer content and clear it for streaming.
+
+        Returns:
+            Current buffered content as string
+        """
+        with self.lock:
+            if not self.buffer:
+                return ""
+            output = "".join(self.buffer)
+            self.buffer.clear()
+            return output
+
 
 class IPMISOLCollector(ConsoleCollector):
     """IPMI Serial-Over-LAN console log collector.
@@ -391,6 +420,19 @@ class IPMISOLCollector(ConsoleCollector):
             and self.collection_thread is not None
             and self.collection_thread.is_alive()
         )
+
+    def get_and_clear_buffer(self) -> str:
+        """Get current buffer content and clear it for streaming.
+
+        Returns:
+            Current buffered content as string
+        """
+        with self.lock:
+            if not self.buffer:
+                return ""
+            output = "".join(self.buffer)
+            self.buffer.clear()
+            return output
 
 
 def create_console_collector(

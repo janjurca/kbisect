@@ -588,6 +588,131 @@ class StateManager:
         finally:
             session.close()
 
+    def create_build_log(
+        self, iteration_id: int, log_type: str, initial_content: str = ""
+    ) -> int:
+        """Create initial build log entry for streaming.
+
+        Args:
+            iteration_id: Iteration ID
+            log_type: Type of log (build, boot, test)
+            initial_content: Optional initial log content (e.g., header)
+
+        Returns:
+            Log ID
+
+        Raises:
+            DatabaseError: If log creation fails
+        """
+        session = self.Session()
+        try:
+            # Compress initial content if provided
+            compressed_content = gzip.compress(initial_content.encode("utf-8")) if initial_content else b""
+            size_bytes = len(compressed_content)
+
+            new_log = BuildLog(
+                iteration_id=iteration_id,
+                log_type=log_type,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                log_content=compressed_content,
+                compressed=True,
+                size_bytes=size_bytes,
+                exit_code=None,  # Will be set when build completes
+            )
+
+            session.add(new_log)
+            session.commit()
+            log_id = new_log.log_id
+
+            logger.debug(f"Created {log_type} log {log_id} for streaming")
+            return log_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create build log: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def append_build_log_chunk(
+        self, log_id: int, chunk: str
+    ) -> None:
+        """Append content to existing build log.
+
+        Args:
+            log_id: Log ID to append to
+            chunk: Log content chunk to append
+
+        Raises:
+            DatabaseError: If append fails
+        """
+        session = self.Session()
+        try:
+            # Get existing log
+            stmt = select(BuildLog).where(BuildLog.log_id == log_id)
+            build_log = session.execute(stmt).scalar_one_or_none()
+
+            if not build_log:
+                raise DatabaseError(f"Build log {log_id} not found")
+
+            # Decompress existing content
+            if build_log.compressed and build_log.log_content:
+                existing_content = gzip.decompress(build_log.log_content).decode("utf-8")
+            else:
+                existing_content = build_log.log_content.decode("utf-8") if build_log.log_content else ""
+
+            # Append new chunk
+            updated_content = existing_content + chunk
+
+            # Recompress
+            compressed_content = gzip.compress(updated_content.encode("utf-8"))
+            build_log.log_content = compressed_content
+            build_log.size_bytes = len(compressed_content)
+
+            session.commit()
+            logger.debug(f"Appended {len(chunk)} bytes to log {log_id} (total compressed: {len(compressed_content)} bytes)")
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to append to build log: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def finalize_build_log(
+        self, log_id: int, exit_code: int
+    ) -> None:
+        """Finalize build log with exit code.
+
+        Args:
+            log_id: Log ID to finalize
+            exit_code: Exit code of the build process
+
+        Raises:
+            DatabaseError: If finalization fails
+        """
+        session = self.Session()
+        try:
+            stmt = select(BuildLog).where(BuildLog.log_id == log_id)
+            build_log = session.execute(stmt).scalar_one_or_none()
+
+            if not build_log:
+                raise DatabaseError(f"Build log {log_id} not found")
+
+            build_log.exit_code = exit_code
+            session.commit()
+            logger.debug(f"Finalized log {log_id} with exit code {exit_code}")
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to finalize build log: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
     def store_build_log(
         self, iteration_id: int, log_type: str, content: str, exit_code: int = 0
     ) -> int:

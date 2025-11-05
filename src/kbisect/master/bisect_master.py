@@ -6,6 +6,7 @@ Orchestrates the kernel bisection process across master and slave machines.
 
 import json
 import logging
+import select
 import shlex
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Generator, List, Optional, Tuple
 
 
 if TYPE_CHECKING:
@@ -225,6 +226,101 @@ class SSHClient:
         command = f"source {shlex.quote(library_path)} && {function_name} {args_str}"
 
         return self.run_command(command, timeout=timeout)
+
+    def call_function_streaming(
+        self,
+        function_name: str,
+        *args: str,
+        library_path: str = "/root/kernel-bisect/lib/bisect-functions.sh",
+        timeout: Optional[int] = None,
+        chunk_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> Tuple[int, str, str]:
+        """Call a bash function and stream output in real-time.
+
+        Args:
+            function_name: Name of the bash function to call
+            *args: Arguments to pass to the function
+            library_path: Path to the bisect library on slave
+            timeout: Command timeout in seconds
+            chunk_callback: Optional callback function(stdout_chunk, stderr_chunk) called as output arrives
+
+        Returns:
+            Tuple of (return_code, stdout, stderr)
+        """
+        # Properly escape arguments to prevent command injection
+        args_str = " ".join(shlex.quote(str(arg)) for arg in args)
+
+        # Source library and call function
+        command = f"source {shlex.quote(library_path)} && {function_name} {args_str}"
+
+        ssh_command = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "ConnectTimeout=10",
+            f"{self.user}@{self.host}",
+            command,
+        ]
+
+        try:
+            # Use Popen for streaming
+            process = subprocess.Popen(
+                ssh_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,  # Line buffered
+            )
+
+            stdout_lines = []
+            stderr_lines = []
+            start_time = time.time()
+
+            # Read output as it arrives
+            while True:
+                # Check timeout
+                if timeout and (time.time() - start_time) > timeout:
+                    process.kill()
+                    logger.error(f"SSH command timed out after {timeout}s")
+                    return -1, "".join(stdout_lines), "Timeout"
+
+                # Use select to check which pipes have data
+                # Note: select() doesn't work on Windows, but kbisect is Linux-focused
+                readable, _, _ = select.select([process.stdout, process.stderr], [], [], 0.1)
+
+                for stream in readable:
+                    line = stream.readline()
+                    if line:
+                        if stream == process.stdout:
+                            stdout_lines.append(line)
+                            if chunk_callback:
+                                chunk_callback(line, "")
+                        else:
+                            stderr_lines.append(line)
+                            if chunk_callback:
+                                chunk_callback("", line)
+
+                # Check if process has ended
+                if process.poll() is not None:
+                    # Read any remaining output
+                    remaining_stdout = process.stdout.read()
+                    remaining_stderr = process.stderr.read()
+                    if remaining_stdout:
+                        stdout_lines.append(remaining_stdout)
+                        if chunk_callback:
+                            chunk_callback(remaining_stdout, "")
+                    if remaining_stderr:
+                        stderr_lines.append(remaining_stderr)
+                        if chunk_callback:
+                            chunk_callback("", remaining_stderr)
+                    break
+
+            return process.returncode, "".join(stdout_lines), "".join(stderr_lines)
+
+        except Exception as exc:
+            logger.error(f"SSH streaming command failed: {exc}")
+            return -1, "", str(exc)
 
     def copy_file(self, local_path: str, remote_path: str) -> bool:
         """Copy file to slave.
@@ -709,6 +805,48 @@ class BisectMaster:
             else:
                 logger.warning("Failed to collect baseline metadata (non-fatal)")
 
+        # Transfer test script to slave if configured
+        if self.config.test_script:
+            script_path = Path(self.config.test_script)
+
+            # Check if it's a local file on master
+            if script_path.exists():
+                logger.info(f"Transferring test script to slave: {script_path}")
+
+                # Derive test-scripts directory from bisect library path
+                bisect_base_dir = Path(self.config.slave_bisect_path).parent
+                remote_script_dir = bisect_base_dir / "test-scripts"
+                remote_script_path = str(remote_script_dir / script_path.name)
+
+                # Create test-scripts directory on slave if it doesn't exist
+                ret, _, stderr = self.ssh.run_command(f"mkdir -p {shlex.quote(str(remote_script_dir))}")
+                if ret != 0:
+                    logger.warning(f"Failed to create test-scripts directory: {stderr}")
+                    # Fall back to /tmp if directory creation fails
+                    remote_script_path = f"/tmp/kbisect-test-{script_path.name}"
+                    logger.warning(f"Falling back to /tmp location: {remote_script_path}")
+
+                if self.ssh.copy_file(str(script_path), remote_script_path):
+                    # Make executable on slave
+                    ret, _, stderr = self.ssh.run_command(f"chmod +x {shlex.quote(remote_script_path)}")
+                    if ret != 0:
+                        logger.warning(f"Failed to make test script executable: {stderr}")
+
+                    # Update config to use remote path
+                    self.config.test_script = remote_script_path
+                    logger.info(f"✓ Test script deployed to slave: {remote_script_path}")
+                else:
+                    logger.error("Failed to transfer test script to slave")
+                    return False
+            else:
+                # Assume it's already an absolute path on slave - verify it exists
+                logger.info(f"Verifying test script exists on slave: {self.config.test_script}")
+                ret, _, _ = self.ssh.run_command(f"test -f {shlex.quote(self.config.test_script)}")
+                if ret != 0:
+                    logger.error(f"Test script not found on slave: {self.config.test_script}")
+                    return False
+                logger.info("✓ Test script verified on slave")
+
         self.save_state()
         logger.info("=== Initialization Complete ===")
         return True
@@ -741,15 +879,15 @@ class BisectMaster:
 
         return commit
 
-    def build_kernel(self, commit_sha: str, iteration_id: int) -> Tuple[bool, int, Optional[int]]:
-        """Build kernel on slave and store build log.
+    def build_kernel(self, commit_sha: str, iteration_id: int) -> Tuple[bool, int, Optional[int], Optional[str]]:
+        """Build kernel on slave and store build log with streaming.
 
         Args:
             commit_sha: Commit SHA to build
             iteration_id: Iteration ID for log storage
 
         Returns:
-            Tuple of (success, exit_code, log_id)
+            Tuple of (success, exit_code, log_id, kernel_version)
         """
         logger.info(f"Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}...")
 
@@ -762,39 +900,102 @@ class BisectMaster:
             kernel_config = "RUNNING"
             logger.debug("Using running kernel config")
 
-        # Call build_kernel function from library
-        ret, stdout, stderr = self.ssh.call_function(
+        # Create initial log entry with header
+        log_header = f"=== Build Kernel: {commit_sha[:SHORT_COMMIT_LENGTH]} ===\n"
+        log_header += f"Kernel source: {self.config.slave_kernel_path}\n"
+        log_header += f"Config: {kernel_config or 'default'}\n\n"
+        log_header += "=== BUILD OUTPUT ===\n"
+
+        log_id = self.state.create_build_log(iteration_id, "build", log_header)
+        logger.debug(f"Created build log {log_id} for streaming")
+
+        # Streaming state
+        buffer = []
+        buffer_size = 0
+        buffer_limit = 10 * 1024  # Flush every 10KB
+        total_bytes = 0
+        start_time = time.time()
+        last_progress_time = start_time
+        progress_interval = 20  # Log progress every 20 seconds
+
+        def stream_callback(stdout_chunk: str, stderr_chunk: str) -> None:
+            """Handle streaming output chunks."""
+            nonlocal buffer, buffer_size, total_bytes, last_progress_time
+
+            chunk = stdout_chunk + stderr_chunk
+            if not chunk:
+                return
+
+            # Add to buffer
+            buffer.append(chunk)
+            chunk_bytes = len(chunk.encode("utf-8"))
+            buffer_size += chunk_bytes
+            total_bytes += chunk_bytes
+
+            # Flush buffer if it's getting large
+            if buffer_size >= buffer_limit:
+                combined_chunk = "".join(buffer)
+                try:
+                    self.state.append_build_log_chunk(log_id, combined_chunk)
+                except Exception as exc:
+                    logger.warning(f"Failed to append log chunk: {exc}")
+
+                buffer.clear()
+                buffer_size = 0
+
+            # Log progress periodically
+            current_time = time.time()
+            if current_time - last_progress_time >= progress_interval:
+                elapsed = int(current_time - start_time)
+                logger.info(f"  Building... {total_bytes // 1024}KB logged, {elapsed // 60}m {elapsed % 60}s elapsed")
+                last_progress_time = current_time
+
+        # Call build_kernel function with streaming
+        ret, stdout, stderr = self.ssh.call_function_streaming(
             "build_kernel",
             commit_sha,
             self.config.slave_kernel_path,
             kernel_config,
             timeout=self.config.build_timeout,
+            chunk_callback=stream_callback,
         )
 
-        # Combine stdout and stderr for full log
-        full_log = f"=== Build Kernel: {commit_sha[:SHORT_COMMIT_LENGTH]} ===\n"
-        full_log += f"Kernel source: {self.config.slave_kernel_path}\n"
-        full_log += f"Config: {kernel_config or 'default'}\n"
-        full_log += f"Exit code: {ret}\n"
-        full_log += "\n=== STDOUT ===\n"
-        full_log += stdout
-        full_log += "\n=== STDERR ===\n"
-        full_log += stderr
+        # Flush remaining buffer
+        if buffer:
+            combined_chunk = "".join(buffer)
+            try:
+                self.state.append_build_log_chunk(log_id, combined_chunk)
+            except Exception as exc:
+                logger.warning(f"Failed to append final log chunk: {exc}")
 
-        # Store build log in database
-        log_id = self.state.store_build_log(iteration_id, "build", full_log, exit_code=ret)
+        # Extract kernel version from build output (last line of stdout)
+        built_kernel_ver = None
+        if ret == 0 and stdout.strip():
+            # The build_kernel bash function outputs the kernel version as its last line
+            built_kernel_ver = stdout.strip().split('\n')[-1]
+            logger.debug(f"Extracted kernel version from build output: {built_kernel_ver}")
+
+        # Add exit code to log
+        footer = f"\n\n=== EXIT CODE: {ret} ===\n"
+        try:
+            self.state.append_build_log_chunk(log_id, footer)
+            self.state.finalize_build_log(log_id, ret)
+        except Exception as exc:
+            logger.warning(f"Failed to finalize log: {exc}")
 
         # Format size for display
         size_kb = self.state.get_build_log(log_id)["size_bytes"] / 1024
+        elapsed = int(time.time() - start_time)
 
         if ret != 0:
-            logger.error(f"✗ Kernel build FAILED (log_id: {log_id}, {size_kb:.1f} KB compressed)")
+            logger.error(f"✗ Kernel build FAILED in {elapsed // 60}m {elapsed % 60}s (log_id: {log_id}, {size_kb:.1f} KB compressed)")
             logger.error(f"  View log: kbisect logs show {log_id}")
-            return False, ret, log_id
+            return False, ret, log_id, None
 
-        logger.info(f"✓ Kernel build complete (log_id: {log_id}, {size_kb:.1f} KB)")
-        logger.debug(f"Kernel version: {stdout.strip()}")
-        return True, ret, log_id
+        logger.info(f"✓ Kernel build complete in {elapsed // 60}m {elapsed % 60}s (log_id: {log_id}, {size_kb:.1f} KB)")
+        if built_kernel_ver:
+            logger.info(f"  Kernel version: {built_kernel_ver}")
+        return True, ret, log_id, built_kernel_ver
 
     def reboot_slave(self, iteration_id: int) -> Tuple[bool, Optional[str]]:
         """Reboot slave machine and return (success, booted_kernel_version).
@@ -806,6 +1007,18 @@ class BisectMaster:
             Tuple of (success, booted_kernel_version)
         """
         logger.info("Rebooting slave...")
+
+        # Create console log entry for streaming (if enabled)
+        console_log_id: Optional[int] = None
+        if self.config.collect_console_logs:
+            try:
+                log_header = "=== Console Log: Boot Cycle ===\n"
+                log_header += f"Timestamp: {datetime.utcnow().isoformat()}\n\n"
+                log_header += "=== CONSOLE OUTPUT ===\n"
+                console_log_id = self.state.create_build_log(iteration_id, "console", log_header)
+                logger.debug(f"Created console log {console_log_id} for streaming")
+            except Exception as exc:
+                logger.warning(f"Failed to create console log entry: {exc}")
 
         # Start console log collection BEFORE reboot
         console_collector = self._start_console_collection()
@@ -820,19 +1033,67 @@ class BisectMaster:
         logger.info("Waiting for slave to reboot...")
         max_wait = self.config.boot_timeout
         waited = 0
+        last_flush_time = time.time()
+        flush_interval = 5  # Flush console buffer every 5 seconds
 
         while waited < max_wait:
             time.sleep(5)
             waited += 5
+
+            # Periodically flush console buffer to database
+            if console_collector and console_log_id:
+                current_time = time.time()
+                if current_time - last_flush_time >= flush_interval:
+                    try:
+                        chunk = console_collector.get_and_clear_buffer()
+                        if chunk:
+                            self.state.append_build_log_chunk(console_log_id, chunk)
+                            stats = console_collector.get_buffer_stats()
+                            logger.debug(f"Flushed console buffer: {len(chunk)} bytes ({stats['lines']} lines in current buffer)")
+                        last_flush_time = current_time
+                    except Exception as exc:
+                        logger.debug(f"Failed to flush console buffer: {exc}")
 
             if self.ssh.is_alive():
                 logger.info(f"✓ Slave is back online after {waited}s")
                 # Give it a bit more time to fully boot
                 time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
 
-                # Stop console collection and store log
-                console_output = self._stop_console_collection(console_collector)
-                self._store_console_log(iteration_id, console_output, "success")
+                # Flush and finalize console log
+                if console_collector and console_log_id:
+                    # Final flush
+                    try:
+                        chunk = console_collector.get_and_clear_buffer()
+                        if chunk:
+                            self.state.append_build_log_chunk(console_log_id, chunk)
+                    except Exception as exc:
+                        logger.debug(f"Failed final console buffer flush: {exc}")
+
+                    # Stop collector and get any remaining output
+                    console_output = self._stop_console_collection(console_collector)
+                    if console_output:
+                        try:
+                            self.state.append_build_log_chunk(console_log_id, console_output)
+                        except Exception as exc:
+                            logger.debug(f"Failed to append final console output: {exc}")
+
+                    # Add footer and finalize
+                    try:
+                        footer = f"\n\n=== BOOT RESULT: success ===\n"
+                        footer += f"Boot time: {waited}s\n"
+                        self.state.append_build_log_chunk(console_log_id, footer)
+                        self.state.finalize_build_log(console_log_id, 0)
+
+                        log_data = self.state.get_build_log(console_log_id)
+                        if log_data:
+                            size_kb = log_data["size_bytes"] / 1024
+                            logger.info(f"✓ Console log captured (log_id: {console_log_id}, {size_kb:.1f} KB)")
+                    except Exception as exc:
+                        logger.warning(f"Failed to finalize console log: {exc}")
+                else:
+                    # Fallback to old method if streaming not enabled
+                    console_output = self._stop_console_collection(console_collector)
+                    self._store_console_log(iteration_id, console_output, "success")
 
                 # Get kernel version that booted
                 ret, kernel_ver, _ = self.ssh.call_function("get_kernel_version")
@@ -845,10 +1106,43 @@ class BisectMaster:
             if waited % 30 == 0:
                 logger.info(f"Still waiting... ({waited}/{max_wait}s)")
 
-        # Timeout! Stop console collection and try IPMI recovery if configured
+        # Timeout! Flush and finalize console log
         logger.error("Slave failed to reboot within timeout")
-        console_output = self._stop_console_collection(console_collector)
-        self._store_console_log(iteration_id, console_output, "timeout")
+
+        if console_collector and console_log_id:
+            # Final flush
+            try:
+                chunk = console_collector.get_and_clear_buffer()
+                if chunk:
+                    self.state.append_build_log_chunk(console_log_id, chunk)
+            except Exception as exc:
+                logger.debug(f"Failed final console buffer flush: {exc}")
+
+            # Stop collector and get remaining output
+            console_output = self._stop_console_collection(console_collector)
+            if console_output:
+                try:
+                    self.state.append_build_log_chunk(console_log_id, console_output)
+                except Exception as exc:
+                    logger.debug(f"Failed to append final console output: {exc}")
+
+            # Add footer and finalize
+            try:
+                footer = f"\n\n=== BOOT RESULT: timeout ===\n"
+                footer += f"Timeout after: {waited}s\n"
+                self.state.append_build_log_chunk(console_log_id, footer)
+                self.state.finalize_build_log(console_log_id, 1)
+
+                log_data = self.state.get_build_log(console_log_id)
+                if log_data:
+                    size_kb = log_data["size_bytes"] / 1024
+                    logger.info(f"✓ Console log captured (log_id: {console_log_id}, {size_kb:.1f} KB)")
+            except Exception as exc:
+                logger.warning(f"Failed to finalize console log: {exc}")
+        else:
+            # Fallback to old method
+            console_output = self._stop_console_collection(console_collector)
+            self._store_console_log(iteration_id, console_output, "timeout")
 
         return self._try_ipmi_recovery()
 
@@ -917,34 +1211,115 @@ class BisectMaster:
         logger.error(f"IPMI recovery failed after {max_attempts} attempts")
         return (False, None)
 
-    def run_tests(self) -> TestResult:
-        """Run tests on slave.
+    def run_tests(self, iteration_id: int) -> Tuple[TestResult, Optional[int]]:
+        """Run tests on slave and store test log with streaming.
+
+        Args:
+            iteration_id: Iteration ID for log storage
 
         Returns:
-            Test result (GOOD, BAD, SKIP, or UNKNOWN)
+            Tuple of (test_result, log_id)
         """
         logger.info("Running tests on slave...")
 
-        # Call run_test function from library
+        # Create initial log entry with header
+        log_header = f"=== Test Execution ===\n"
+        log_header += f"Test type: {self.config.test_type}\n"
         if self.config.test_script:
-            ret, stdout, stderr = self.ssh.call_function(
+            log_header += f"Test script: {self.config.test_script}\n"
+        log_header += f"Timeout: {self.config.test_timeout}s\n\n"
+        log_header += "=== TEST OUTPUT ===\n"
+
+        log_id = self.state.create_build_log(iteration_id, "test", log_header)
+        logger.debug(f"Created test log {log_id} for streaming")
+
+        # Streaming state
+        buffer = []
+        buffer_size = 0
+        buffer_limit = 10 * 1024  # Flush every 10KB
+        total_bytes = 0
+        start_time = time.time()
+        last_progress_time = start_time
+        progress_interval = 20  # Log progress every 20 seconds
+
+        def stream_callback(stdout_chunk: str, stderr_chunk: str) -> None:
+            """Handle streaming output chunks."""
+            nonlocal buffer, buffer_size, total_bytes, last_progress_time
+
+            chunk = stdout_chunk + stderr_chunk
+            if not chunk:
+                return
+
+            # Add to buffer
+            buffer.append(chunk)
+            chunk_bytes = len(chunk.encode("utf-8"))
+            buffer_size += chunk_bytes
+            total_bytes += chunk_bytes
+
+            # Flush buffer if it's getting large
+            if buffer_size >= buffer_limit:
+                combined_chunk = "".join(buffer)
+                try:
+                    self.state.append_build_log_chunk(log_id, combined_chunk)
+                except Exception as exc:
+                    logger.warning(f"Failed to append log chunk: {exc}")
+
+                buffer.clear()
+                buffer_size = 0
+
+            # Log progress periodically (mainly useful for long-running custom tests)
+            current_time = time.time()
+            if current_time - last_progress_time >= progress_interval:
+                elapsed = int(current_time - start_time)
+                logger.info(f"  Testing... {total_bytes // 1024}KB logged, {elapsed // 60}m {elapsed % 60}s elapsed")
+                last_progress_time = current_time
+
+        # Call run_test function with streaming
+        if self.config.test_script:
+            ret, stdout, stderr = self.ssh.call_function_streaming(
                 "run_test",
                 self.config.test_type,
                 self.config.test_script,
                 timeout=self.config.test_timeout,
+                chunk_callback=stream_callback,
             )
         else:
-            ret, stdout, stderr = self.ssh.call_function("run_test", self.config.test_type, timeout=self.config.test_timeout)
+            ret, stdout, stderr = self.ssh.call_function_streaming(
+                "run_test",
+                self.config.test_type,
+                timeout=self.config.test_timeout,
+                chunk_callback=stream_callback,
+            )
+
+        # Flush remaining buffer
+        if buffer:
+            combined_chunk = "".join(buffer)
+            try:
+                self.state.append_build_log_chunk(log_id, combined_chunk)
+            except Exception as exc:
+                logger.warning(f"Failed to append final log chunk: {exc}")
+
+        # Add exit code to log
+        footer = f"\n\n=== EXIT CODE: {ret} ===\n"
+        try:
+            self.state.append_build_log_chunk(log_id, footer)
+            self.state.finalize_build_log(log_id, ret)
+        except Exception as exc:
+            logger.warning(f"Failed to finalize log: {exc}")
+
+        # Format size for display
+        size_kb = self.state.get_build_log(log_id)["size_bytes"] / 1024
+        elapsed = int(time.time() - start_time)
 
         logger.debug(f"Test output: {stdout}")
 
         if ret == 0:
-            logger.info("✓ Tests PASSED")
-            return TestResult.GOOD
+            logger.info(f"✓ Tests PASSED in {elapsed}s (log_id: {log_id}, {size_kb:.1f} KB compressed)")
+            return (TestResult.GOOD, log_id)
 
-        logger.error("✗ Tests FAILED")
+        logger.error(f"✗ Tests FAILED in {elapsed}s (log_id: {log_id}, {size_kb:.1f} KB compressed)")
         logger.debug(f"Test error: {stderr}")
-        return TestResult.BAD
+        return (TestResult.BAD, log_id)
 
     def mark_commit(self, commit_sha: str, result: TestResult) -> bool:
         """Mark commit as good or bad in git bisect.
@@ -1071,7 +1446,7 @@ class BisectMaster:
             iteration.state = BisectState.BUILDING
             self.save_state()
 
-            success, _exit_code, _log_id = self.build_kernel(commit_sha, iteration_id)
+            success, _exit_code, _log_id, expected_kernel_ver = self.build_kernel(commit_sha, iteration_id)
             if not success:
                 iteration.result = TestResult.SKIP
                 iteration.error = "Build failed"
@@ -1080,13 +1455,9 @@ class BisectMaster:
                 self.state.update_iteration(iteration_id, final_result="skip", error_message="Build failed")
                 return iteration
 
-            # Get kernel version that was just built
-            ret, kernel_version, _ = self.ssh.run_command(f"cd {self.config.slave_kernel_path} && make kernelrelease")
-            expected_kernel_ver = kernel_version.strip() if ret == 0 and kernel_version.strip() else None
-            if expected_kernel_ver:
-                logger.info(f"Built kernel version: {expected_kernel_ver}")
-            else:
-                logger.warning("Could not determine kernel version")
+            # Kernel version was extracted from build output
+            if not expected_kernel_ver:
+                logger.warning("Could not determine kernel version from build output")
 
             # Reboot slave
             iteration.state = BisectState.REBOOTING
@@ -1154,7 +1525,7 @@ class BisectMaster:
             iteration.state = BisectState.TESTING
             self.save_state()
 
-            test_result = self.run_tests()
+            test_result, test_log_id = self.run_tests(iteration_id)
             iteration.result = test_result
 
             # Update iteration in database
@@ -1243,10 +1614,10 @@ class BisectMaster:
         """
         data = asdict(iteration)
         # Convert enums to their string values for JSON serialization
-        if isinstance(data.get('state'), BisectState):
-            data['state'] = data['state'].value
-        if data.get('result') and isinstance(data['result'], TestResult):
-            data['result'] = data['result'].value
+        if isinstance(data.get("state"), BisectState):
+            data["state"] = data["state"].value
+        if data.get("result") and isinstance(data["result"], TestResult):
+            data["result"] = data["result"].value
         return data
 
     def save_state(self) -> None:

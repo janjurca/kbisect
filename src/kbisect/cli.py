@@ -8,6 +8,7 @@ import argparse
 import logging
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -58,7 +59,23 @@ def load_config(config_path: str) -> Dict[str, Any]:
         sys.exit(1)
 
     with path.open() as f:
-        return yaml.safe_load(f)
+        config_dict = yaml.safe_load(f)
+
+    # Resolve relative paths in config relative to config file location
+    config_dir = path.parent.resolve()
+
+    # Resolve test script path if it's relative
+    if config_dict.get("test", {}).get("script"):
+        test_script = config_dict["test"]["script"]
+        test_script_path = Path(test_script)
+
+        # Only resolve if it's not already absolute
+        if not test_script_path.is_absolute():
+            resolved_path = (config_dir / test_script_path).resolve()
+            config_dict["test"]["script"] = str(resolved_path)
+            logger.debug(f"Resolved test script path: {test_script} -> {resolved_path}")
+
+    return config_dict
 
 
 def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig:
@@ -106,11 +123,8 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
         boot_timeout=config_dict.get("timeouts", {}).get("boot", 300),
         test_timeout=config_dict.get("timeouts", {}).get("test", 600),
         build_timeout=config_dict.get("timeouts", {}).get("build", 1800),
-        test_type=getattr(args, "test_type", None)
-        or config_dict.get("test", {}).get("type")
-        or config_dict.get("tests", [{}])[0].get("type", "boot"),  # backward compat
-        test_script=getattr(args, "test_script", None)
-        or config_dict.get("test", {}).get("script"),
+        test_type=config_dict.get("test", {}).get("type", "boot"),
+        test_script=config_dict.get("test", {}).get("script"),
         state_dir=config_dict.get("state_dir", "."),
         db_path=config_dict.get("database_path", "bisect.db"),
         kernel_config_file=kernel_config_file,
@@ -263,10 +277,7 @@ def cmd_start(args: argparse.Namespace) -> int:
                 # Determine what to mark based on error message
                 if "Boot timeout" in last_iteration.error_message or "Kernel panic" in last_iteration.error_message:
                     # Determine mark type based on original test type
-                    test_type = (
-                        config_dict.get("test", {}).get("type")
-                        or config_dict.get("tests", [{}])[0].get("type", "boot")  # backward compat
-                    )
+                    test_type = config_dict.get("test", {}).get("type", "boot")
                     if test_type == "boot":
                         mark_as = "bad"
                         print("  Boot test mode: marking as BAD")
@@ -602,6 +613,70 @@ def cmd_logs(args: argparse.Namespace) -> int:
             print(f"Failed to export log: {exc}")
             return 1
 
+    elif args.logs_command == "tail":
+        # Tail log in real-time
+        log_id = args.log_id
+        interval = args.interval
+
+        # Get initial log state
+        log_data = state.get_build_log(log_id)
+        if not log_data:
+            print(f"Log {log_id} not found")
+            return 1
+
+        # Display header
+        print(f"=== Tailing Log {log_id} ===")
+        print(f"Type:      {log_data['log_type']}")
+        print(f"Iteration: {log_data['iteration_num']}")
+        print(f"Commit:    {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
+        if log_data['exit_code'] is not None:
+            exit_status = "SUCCESS" if log_data['exit_code'] == 0 else "FAILED"
+            print(f"Status:    {exit_status} (already completed)")
+        else:
+            print("Status:    IN PROGRESS")
+        print(f"Interval:  {interval}s")
+        print("\nPress Ctrl+C to stop")
+        print("=" * 80 + "\n")
+
+        # Display initial content
+        print(log_data["content"], end="", flush=True)
+        last_length = len(log_data["content"])
+
+        # If already finalized, no need to poll
+        if log_data['exit_code'] is not None:
+            print(f"\n\n[Log already finalized with exit code: {log_data['exit_code']}]")
+            state.close()
+            return 0
+
+        # Poll for updates
+        try:
+            while True:
+                time.sleep(interval)
+
+                # Re-fetch log
+                log_data = state.get_build_log(log_id)
+                if not log_data:
+                    print("\n\n[Error: Log no longer exists]")
+                    break
+
+                current_content = log_data["content"]
+                current_length = len(current_content)
+
+                # Display new content
+                if current_length > last_length:
+                    new_content = current_content[last_length:]
+                    print(new_content, end="", flush=True)
+                    last_length = current_length
+
+                # Check if finalized
+                if log_data["exit_code"] is not None:
+                    exit_status = "SUCCESS" if log_data["exit_code"] == 0 else "FAILED"
+                    print(f"\n\n[Log finalized: {exit_status} (exit code: {log_data['exit_code']})]")
+                    break
+
+        except KeyboardInterrupt:
+            print("\n\n[Tail stopped by user]")
+
     state.close()
     return 0
 
@@ -876,7 +951,6 @@ def create_parser() -> argparse.ArgumentParser:
     parser_init.add_argument("good_commit", help="Known good commit")
     parser_init.add_argument("bad_commit", help="Known bad commit")
     parser_init.add_argument("--slave-host", help="Slave hostname (override config)")
-    parser_init.add_argument("--test-type", choices=["boot", "custom"], help="Test type")
     parser_init.add_argument(
         "--force-deploy",
         action="store_true",
@@ -901,8 +975,6 @@ def create_parser() -> argparse.ArgumentParser:
     parser_start = subparsers.add_parser("start", help="Start bisection")
     parser_start.add_argument("good_commit", nargs="?", help="Known good commit")
     parser_start.add_argument("bad_commit", nargs="?", help="Known bad commit")
-    parser_start.add_argument("--test-type", choices=["boot", "custom"], help="Test type")
-    parser_start.add_argument("--test-script", help="Custom test script path")
     parser_start.add_argument("--reinit", action="store_true", help="Reinitialize bisection")
     parser_start.add_argument("--kernel-config", help="Path to kernel .config file to use as base")
     parser_start.add_argument(
@@ -993,6 +1065,13 @@ def create_parser() -> argparse.ArgumentParser:
     parser_logs_export = logs_subparsers.add_parser("export", help="Export log to file")
     parser_logs_export.add_argument("log_id", type=int, help="Log ID to export")
     parser_logs_export.add_argument("output_file", help="Output file path")
+
+    # logs tail
+    parser_logs_tail = logs_subparsers.add_parser("tail", help="Tail (follow) a log in real-time")
+    parser_logs_tail.add_argument("log_id", type=int, help="Log ID to tail")
+    parser_logs_tail.add_argument(
+        "--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)"
+    )
 
     # metadata command
     parser_metadata = subparsers.add_parser("metadata", help="Manage metadata")

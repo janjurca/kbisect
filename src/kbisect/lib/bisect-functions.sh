@@ -286,43 +286,59 @@ build_kernel() {
     # to the protected kernel (which remains as permanent default)
     local boot_set=false
     if command -v grub2-reboot &> /dev/null; then
-        # RHEL/Fedora/Rocky - find boot entry and set one-time boot
-        local entry_index=$(grubby --info="$bootfile" 2>/dev/null | grep '^index=' | cut -d= -f2)
-        if [ -n "$entry_index" ]; then
-            if grub2-reboot "$entry_index" 2>/dev/null; then
-                boot_set=true
-            else
-                echo "ERROR: grub2-reboot failed for entry $entry_index" >&2
-                return 1
-            fi
+        # RHEL/Fedora/Rocky - Use grub2-editenv for reliable one-time boot
+        echo "Setting one-time boot for: $kernel_version" >&2
+
+        # Method 1: Try grub2-reboot with kernel version (works on BLS-based systems)
+        if grub2-reboot "$kernel_version" 2>/dev/null; then
+            boot_set=true
+            echo "✓ Set one-time boot via grub2-reboot (BLS)" >&2
         else
-            echo "Warning: Could not find boot entry for $bootfile, using grubby fallback" >&2
-            if grubby --set-default "$bootfile" 2>/dev/null; then
-                boot_set=true
-            else
-                echo "ERROR: grubby --set-default failed" >&2
+            # Method 2: Use grub2-editenv to directly set saved_entry
+            # This is more reliable than grub2-reboot on older systems
+            local entry_index=$(grubby --info="$bootfile" 2>/dev/null | grep '^index=' | cut -d= -f2)
+
+            if [ -n "$entry_index" ]; then
+                # Try setting saved_entry with numeric index first
+                if grub2-editenv - set saved_entry="$entry_index" 2>/dev/null; then
+                    boot_set=true
+                    echo "✓ Set one-time boot via grub2-editenv (index: $entry_index)" >&2
+                else
+                    # Method 3: Try getting menu entry ID from grubby
+                    local menu_id=$(grubby --info="$bootfile" 2>/dev/null | grep '^id=' | cut -d= -f2 | tr -d '"')
+                    if [ -n "$menu_id" ]; then
+                        if grub2-editenv - set saved_entry="$menu_id" 2>/dev/null; then
+                            boot_set=true
+                            echo "✓ Set one-time boot via grub2-editenv (menu ID: $menu_id)" >&2
+                        fi
+                    fi
+                fi
+            fi
+
+            # If all grub2 methods failed, do NOT fall back to permanent default
+            if [ "$boot_set" != "true" ]; then
+                echo "ERROR: All grub2 one-time boot methods failed" >&2
+                echo "  Tried: grub2-reboot, grub2-editenv with index and menu ID" >&2
+                echo "  Refusing to set permanent default - bisection safety risk" >&2
                 return 1
             fi
         fi
     elif command -v grub-reboot &> /dev/null; then
         # Debian/Ubuntu - use grub-reboot with kernel version
+        echo "Setting one-time boot for: $kernel_version" >&2
         if grub-reboot "$kernel_version" 2>/dev/null; then
             boot_set=true
+            echo "✓ Set one-time boot via grub-reboot" >&2
         else
             echo "ERROR: grub-reboot failed for kernel $kernel_version" >&2
             return 1
         fi
-    elif command -v grubby &> /dev/null; then
-        # Fallback: use grubby (WARNING: this sets permanent default, not one-time)
-        echo "Warning: grub-reboot not available, using grubby (not one-time boot)" >&2
-        if grubby --set-default "$bootfile" 2>/dev/null; then
-            boot_set=true
-        else
-            echo "ERROR: grubby --set-default failed" >&2
-            return 1
-        fi
     else
-        echo "ERROR: No GRUB boot manager found (grub2-reboot, grub-reboot, or grubby)" >&2
+        # No one-time boot mechanism available
+        echo "ERROR: No one-time boot mechanism available!" >&2
+        echo "  This system requires grub2-reboot (RHEL/Fedora) or grub-reboot (Debian/Ubuntu)" >&2
+        echo "  Bisection cannot safely proceed without one-time boot support" >&2
+        echo "  Install grub2-tools (RHEL) or grub-common (Debian) package" >&2
         return 1
     fi
 
