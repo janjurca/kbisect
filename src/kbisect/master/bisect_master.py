@@ -402,6 +402,20 @@ class BisectMaster:
         # Console collector (created per boot cycle)
         self.active_console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
 
+        # Resolve test script path: if it's a local file on master, compute the remote path on slave
+        # This ensures the config always uses the slave path for execution, whether first run or resume
+        self._original_test_script = self.config.test_script
+        if self.config.test_script:
+            script_path = Path(self.config.test_script)
+            if script_path.exists():
+                # It's a local file on master - use remote path for execution
+                logger.debug(f"Test script is local file on master: {self.config.test_script}")
+                bisect_base_dir = Path(self.config.slave_bisect_path).parent
+                remote_script_dir = bisect_base_dir / "test-scripts"
+                remote_script_path = str(remote_script_dir / script_path.name)
+                self.config.test_script = remote_script_path
+                logger.debug(f"Resolved test script to slave path: {remote_script_path}")
+
     def collect_and_store_metadata(self, collection_type: str, iteration_id: Optional[int] = None) -> bool:
         """Collect metadata from slave and store in database.
 
@@ -739,6 +753,19 @@ class BisectMaster:
                 return False
 
             logger.info("✓ Repository verified on slave")
+
+            # Reset repository to clean state (removes any modifications from transfer)
+            logger.info("Resetting repository to clean state on slave...")
+            ret, _stdout, stderr = self.ssh.run_command(
+                f"cd {shlex.quote(self.config.slave_kernel_path)} && git reset --hard HEAD"
+            )
+
+            if ret != 0:
+                logger.warning(f"Failed to reset repository: {stderr}")
+                logger.warning("Repository may have uncommitted changes")
+            else:
+                logger.info("✓ Repository reset to clean state")
+
             return True
 
         except subprocess.TimeoutExpired:
@@ -806,8 +833,8 @@ class BisectMaster:
                 logger.warning("Failed to collect baseline metadata (non-fatal)")
 
         # Transfer test script to slave if configured
-        if self.config.test_script:
-            script_path = Path(self.config.test_script)
+        if self._original_test_script:
+            script_path = Path(self._original_test_script)
 
             # Check if it's a local file on master
             if script_path.exists():
@@ -832,8 +859,6 @@ class BisectMaster:
                     if ret != 0:
                         logger.warning(f"Failed to make test script executable: {stderr}")
 
-                    # Update config to use remote path
-                    self.config.test_script = remote_script_path
                     logger.info(f"✓ Test script deployed to slave: {remote_script_path}")
                 else:
                     logger.error("Failed to transfer test script to slave")

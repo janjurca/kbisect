@@ -45,6 +45,41 @@ EOF
         grubby --set-default="/boot/vmlinuz-${current_kernel}" 2>/dev/null
     fi
 
+    # Configure GRUB for one-time boot support
+    # This is CRITICAL for safe bisection - without GRUB_DEFAULT=saved,
+    # grub2-reboot/grub-reboot will not work and system will boot test kernels permanently
+    echo "Configuring GRUB for one-time boot support..." >&2
+
+    if [ -f /etc/default/grub ]; then
+        # Check if GRUB_DEFAULT is already set to saved
+        if ! grep -q '^GRUB_DEFAULT=saved' /etc/default/grub 2>/dev/null; then
+            echo "  Setting GRUB_DEFAULT=saved in /etc/default/grub" >&2
+
+            # Backup original
+            cp /etc/default/grub /etc/default/grub.bisect-backup 2>/dev/null
+
+            # Remove any existing GRUB_DEFAULT line and add saved
+            sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
+            echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
+
+            # Regenerate GRUB config to apply changes
+            echo "  Regenerating GRUB configuration..." >&2
+            if command -v grub2-mkconfig &> /dev/null; then
+                grub2-mkconfig -o /boot/grub2/grub.cfg >&2 2>&1
+            elif command -v grub-mkconfig &> /dev/null; then
+                grub-mkconfig -o /boot/grub/grub.cfg >&2 2>&1
+            else
+                echo "  Warning: Could not find grub2-mkconfig or grub-mkconfig" >&2
+            fi
+
+            echo "✓ GRUB configured for one-time boot (GRUB_DEFAULT=saved)" >&2
+        else
+            echo "✓ GRUB already configured for one-time boot" >&2
+        fi
+    else
+        echo "Warning: /etc/default/grub not found - GRUB configuration may not persist" >&2
+    fi
+
     chmod 600 "$BISECT_DIR/protected-kernels.list" "$BISECT_DIR/safe-kernel.info"
 
     echo "Protected kernel: $current_kernel" >&2
@@ -87,6 +122,50 @@ verify_protection() {
     done < "$BISECT_DIR/protected-kernels.list"
 
     [ $missing -eq 0 ]
+}
+
+verify_grub_config() {
+    echo "=== GRUB Configuration Check ===" >&2
+
+    # Check GRUB_DEFAULT setting
+    if [ -f /etc/default/grub ]; then
+        local grub_default=$(grep '^GRUB_DEFAULT=' /etc/default/grub 2>/dev/null | cut -d= -f2)
+        echo "GRUB_DEFAULT: ${grub_default:-<not set>}" >&2
+
+        if [ "$grub_default" != "saved" ]; then
+            echo "⚠ WARNING: GRUB_DEFAULT is not set to 'saved'" >&2
+            echo "  One-time boot will NOT work correctly!" >&2
+            echo "  Run init_protection() to fix this." >&2
+            return 1
+        fi
+    else
+        echo "✗ /etc/default/grub not found" >&2
+        return 1
+    fi
+
+    # Check current saved_entry (one-time boot flag)
+    if command -v grub2-editenv &> /dev/null; then
+        local saved_entry=$(grub2-editenv list 2>/dev/null | grep saved_entry)
+        echo "Current saved_entry: ${saved_entry:-<not set>}" >&2
+    elif command -v grub-editenv &> /dev/null; then
+        local saved_entry=$(grub-editenv list 2>/dev/null | grep saved_entry)
+        echo "Current saved_entry: ${saved_entry:-<not set>}" >&2
+    fi
+
+    # Check default kernel
+    if command -v grubby &> /dev/null; then
+        local default_kernel=$(grubby --default-kernel 2>/dev/null)
+        echo "Default kernel: ${default_kernel:-<not set>}" >&2
+    fi
+
+    # Check protected kernel
+    if [ -f "$BISECT_DIR/safe-kernel.info" ]; then
+        local protected_kernel=$(grep '^SAFE_KERNEL_VERSION=' "$BISECT_DIR/safe-kernel.info" | cut -d= -f2)
+        echo "Protected kernel: ${protected_kernel:-<not found>}" >&2
+    fi
+
+    echo "================================" >&2
+    return 0
 }
 
 # ============================================================================
@@ -220,6 +299,18 @@ build_kernel() {
 
     cd "$kernel_path" || return 1
 
+    # Reset repository to clean state before checkout
+    # This removes any modifications from previous builds or file timestamp changes
+    echo "Resetting repository to clean state..." >&2
+    git reset --hard HEAD >&2 2>&1 || {
+        echo "Warning: git reset failed, repository may be dirty" >&2
+    }
+
+    # Remove any untracked files and directories
+    git clean -fd >&2 2>&1 || {
+        echo "Warning: git clean failed, untracked files may remain" >&2
+    }
+
     # Checkout commit
     git checkout "$commit" 2>&1 || return 1
 
@@ -280,6 +371,14 @@ build_kernel() {
     # Get kernel version
     local kernel_version=$(make kernelrelease 2>/dev/null)
     local bootfile="/boot/vmlinuz-${kernel_version}"
+
+    # Add panic=5 parameter for auto-reboot on kernel panic
+    # If test kernel panics, it will automatically reboot after 5 seconds
+    # and fall back to protected kernel via one-time boot mechanism
+    if command -v grubby &> /dev/null; then
+        grubby --update-kernel="$bootfile" --args="panic=5" 2>/dev/null || true
+        echo "✓ Added panic=5 parameter for auto-recovery on panic" >&2
+    fi
 
     # Set as next boot (ONE-TIME BOOT)
     # This ensures that if the kernel panics, next reboot automatically falls back
