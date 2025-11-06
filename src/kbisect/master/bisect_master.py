@@ -1379,7 +1379,7 @@ class BisectMaster:
         logger.debug(f"Test error: {stderr}")
         return (TestResult.BAD, log_id)
 
-    def mark_commit(self, commit_sha: str, result: TestResult) -> bool:
+    def mark_commit(self, commit_sha: str, result: TestResult) -> Tuple[bool, bool]:
         """Mark commit as good or bad in git bisect.
 
         Args:
@@ -1387,7 +1387,7 @@ class BisectMaster:
             result: Test result
 
         Returns:
-            True if marking succeeded, False otherwise
+            Tuple of (success, bisection_complete)
         """
         if result == TestResult.SKIP:
             bisect_cmd = "git bisect skip"
@@ -1397,18 +1397,25 @@ class BisectMaster:
             bisect_cmd = "git bisect bad"
         else:
             logger.error(f"Cannot mark commit with result: {result}")
-            return False
+            return (False, False)
 
-        ret, _stdout, stderr = self.ssh.run_command(
+        ret, stdout, stderr = self.ssh.run_command(
             f"cd {shlex.quote(self.config.slave_kernel_path)} && {bisect_cmd}"
         )
 
         if ret != 0:
             logger.error(f"Failed to mark commit: {stderr}")
-            return False
+            return (False, False)
+
+        # Check if bisection just completed
+        bisection_complete = "first bad commit" in stdout or "first bad commit" in stderr
 
         logger.info(f"Marked commit {commit_sha[:SHORT_COMMIT_LENGTH]} as {result.value}")
-        return True
+
+        if bisection_complete:
+            logger.info("Git bisect reports: First bad commit found!")
+
+        return (True, bisection_complete)
 
     def _handle_boot_failure(
         self,
@@ -1418,7 +1425,7 @@ class BisectMaster:
         expected_kernel_ver: Optional[str],
         actual_kernel_ver: Optional[str],
         is_timeout: bool = False,
-    ) -> None:
+    ) -> Optional[bool]:
         """Handle boot failure scenario.
 
         Args:
@@ -1428,6 +1435,9 @@ class BisectMaster:
             expected_kernel_ver: Expected kernel version
             actual_kernel_ver: Actual kernel version that booted
             is_timeout: Whether failure was due to timeout
+
+        Returns:
+            True if bisection completed, False if not, None if slave is down
         """
         if is_timeout:
             logger.error("✗ Boot timeout - slave did not respond!")
@@ -1458,26 +1468,28 @@ class BisectMaster:
             # Store iteration with error, but don't mark in git bisect yet
             self.state.update_iteration(iteration_id, error_message=iteration.error + " (git mark pending - slave down)")
             self.state.update_session(self.session_id, status="halted")
-            return
+            return None
 
         # SSH is working - safe to mark commit
+        bisection_complete = False
         if iteration.result == TestResult.BAD:
             logger.error("  Marking as BAD (boot test mode)")
-            self.mark_commit(commit_sha, TestResult.BAD)
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.BAD)
         else:
             logger.warning("  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)")
-            self.mark_commit(commit_sha, TestResult.SKIP)
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
 
         self.state.update_iteration(iteration_id, final_result=result_str, error_message=iteration.error)
+        return bisection_complete
 
-    def run_iteration(self, commit_sha: str) -> BisectIteration:
+    def run_iteration(self, commit_sha: str) -> Tuple[BisectIteration, bool]:
         """Run single bisection iteration.
 
         Args:
             commit_sha: Commit SHA to test
 
         Returns:
-            BisectIteration object with results
+            Tuple of (BisectIteration object, bisection_complete flag)
         """
         self.iteration_count += 1
 
@@ -1501,6 +1513,8 @@ class BisectMaster:
         logger.info(f"\n=== Iteration {iteration.iteration}: {iteration.commit_short} ===")
         logger.info(f"Commit: {iteration.commit_message}")
 
+        bisection_complete = False
+
         try:
             # Build kernel
             iteration.state = BisectState.BUILDING
@@ -1511,9 +1525,9 @@ class BisectMaster:
                 iteration.result = TestResult.SKIP
                 iteration.error = "Build failed"
                 logger.error("Build failed, skipping commit")
-                self.mark_commit(commit_sha, TestResult.SKIP)
+                _, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
                 self.state.update_iteration(iteration_id, final_result="skip", error_message="Build failed")
-                return iteration
+                return (iteration, bisection_complete)
 
             # Kernel version was extracted from build output
             if not expected_kernel_ver:
@@ -1527,7 +1541,7 @@ class BisectMaster:
 
             if not reboot_success:
                 # Boot timeout or complete failure
-                self._handle_boot_failure(iteration, iteration_id, commit_sha, expected_kernel_ver, None, is_timeout=True)
+                maybe_complete = self._handle_boot_failure(iteration, iteration_id, commit_sha, expected_kernel_ver, None, is_timeout=True)
 
                 # Check if system is still down after recovery attempts
                 if not self.ssh.is_alive():
@@ -1549,7 +1563,11 @@ class BisectMaster:
                     logger.critical("=" * 70 + "\n")
                     sys.exit(1)
 
-                return iteration
+                # Slave is up but boot failed - check if bisection completed
+                if maybe_complete is not None:
+                    bisection_complete = maybe_complete
+
+                return (iteration, bisection_complete)
 
             # Verify which kernel actually booted
             if actual_kernel_ver:
@@ -1557,7 +1575,7 @@ class BisectMaster:
 
                 if expected_kernel_ver and actual_kernel_ver != expected_kernel_ver:
                     # Kernel panic detected - system fell back to protected kernel
-                    self._handle_boot_failure(
+                    maybe_complete = self._handle_boot_failure(
                         iteration,
                         iteration_id,
                         commit_sha,
@@ -1565,7 +1583,9 @@ class BisectMaster:
                         actual_kernel_ver,
                         is_timeout=False,
                     )
-                    return iteration
+                    if maybe_complete is not None:
+                        bisection_complete = maybe_complete
+                    return (iteration, bisection_complete)
 
                 logger.info("✓ Correct kernel booted successfully")
             else:
@@ -1596,7 +1616,7 @@ class BisectMaster:
             )
 
             # Mark in git bisect
-            self.mark_commit(commit_sha, test_result)
+            _, bisection_complete = self.mark_commit(commit_sha, test_result)
 
         except Exception as exc:
             logger.error(f"Iteration failed with exception: {exc}")
@@ -1613,7 +1633,7 @@ class BisectMaster:
             self.iterations.append(iteration)
             self.save_state()
 
-        return iteration
+        return (iteration, bisection_complete)
 
     def run(self) -> bool:
         """Run complete bisection.
@@ -1648,16 +1668,12 @@ class BisectMaster:
                 break
 
             # Run iteration
-            iteration = self.run_iteration(commit)
+            iteration, bisection_complete = self.run_iteration(commit)
 
             logger.info(f"Result: {iteration.result.value}")
 
-            # Check if bisection is done
-            _ret, stdout, _ = self.ssh.run_command(
-                f"cd {shlex.quote(self.config.slave_kernel_path)} && git bisect log | tail -1"
-            )
-
-            if "is the first bad commit" in stdout:
+            # Check if bisection completed
+            if bisection_complete:
                 logger.info("\n=== Bisection Found First Bad Commit! ===")
                 self.generate_report()
                 return True
