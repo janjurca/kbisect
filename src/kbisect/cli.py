@@ -250,7 +250,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
         # Verify slave connectivity before resuming
         print("\nVerifying slave connectivity...")
-        slave_host = args.slave_host or config_dict["slave"]["hostname"]
+        slave_host = getattr(args, "slave_host", None) or config_dict["slave"]["hostname"]
         slave_user = config_dict["slave"].get("ssh_user", "root")
 
         from kbisect.master.bisect_master import SSHClient
@@ -972,6 +972,9 @@ def create_parser() -> argparse.ArgumentParser:
     parser_start.add_argument("--kernel-config", help="Path to kernel .config file to use as base")
     parser_start.add_argument(
         "--use-running-config", action="store_true", help="Use running kernel config as base"
+    )
+    parser_start.add_argument(
+        "--slave-host", help="Slave hostname (override config)"
     )
     parser_start.add_argument(
         "--console-collector",

@@ -76,6 +76,14 @@ EOF
             sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
             echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
 
+            # Configure GRUB timeout for auto-boot (prevents waiting forever at menu)
+            sed -i '/^GRUB_TIMEOUT=/d' /etc/default/grub
+            echo 'GRUB_TIMEOUT=5' >> /etc/default/grub
+
+            # Set timeout style to countdown (shows timer, auto-boots)
+            sed -i '/^GRUB_TIMEOUT_STYLE=/d' /etc/default/grub
+            echo 'GRUB_TIMEOUT_STYLE=countdown' >> /etc/default/grub
+
             # Regenerate GRUB config to apply changes
             echo "  Regenerating GRUB configuration..." >&2
             if command -v grub2-mkconfig &> /dev/null; then
