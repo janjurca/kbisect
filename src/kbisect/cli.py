@@ -99,11 +99,9 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
     # Get metadata settings from config
     metadata_config = config_dict.get("metadata", {})
 
-    # Get console log settings (CLI args override config file)
+    # Get console log settings from config file
     console_logs_config = config_dict.get("console_logs", {})
-    collect_console_logs = getattr(args, "collect_console_logs", None)
-    if collect_console_logs is None:
-        collect_console_logs = console_logs_config.get("enabled", False)
+    collect_console_logs = console_logs_config.get("enabled", False)
 
     console_collector_type = getattr(args, "console_collector", None) or console_logs_config.get(
         "collector", "auto"
@@ -961,11 +959,6 @@ def create_parser() -> argparse.ArgumentParser:
         "--use-running-config", action="store_true", help="Use running kernel config as base"
     )
     parser_init.add_argument(
-        "--collect-console-logs",
-        action="store_true",
-        help="Enable console log collection during boot",
-    )
-    parser_init.add_argument(
         "--console-collector",
         choices=["conserver", "ipmi", "auto"],
         help="Console collector type (overrides config)",
@@ -979,11 +972,6 @@ def create_parser() -> argparse.ArgumentParser:
     parser_start.add_argument("--kernel-config", help="Path to kernel .config file to use as base")
     parser_start.add_argument(
         "--use-running-config", action="store_true", help="Use running kernel config as base"
-    )
-    parser_start.add_argument(
-        "--collect-console-logs",
-        action="store_true",
-        help="Enable console log collection during boot",
     )
     parser_start.add_argument(
         "--console-collector",

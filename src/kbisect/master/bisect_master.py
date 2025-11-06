@@ -766,6 +766,19 @@ class BisectMaster:
             else:
                 logger.info("✓ Repository reset to clean state")
 
+            # Configure git to trust this repository (fixes "dubious ownership" error in Git 2.35.2+)
+            # This is needed because the repository is transferred from master and may have different ownership
+            logger.info("Configuring git safe.directory...")
+            ret, _stdout, stderr = self.ssh.run_command(
+                f"git config --global --add safe.directory {shlex.quote(self.config.slave_kernel_path)}"
+            )
+
+            if ret != 0:
+                logger.warning(f"Failed to configure git safe.directory: {stderr}")
+                logger.warning("Git commands may fail due to ownership checks")
+            else:
+                logger.info("✓ Git safe.directory configured")
+
             return True
 
         except subprocess.TimeoutExpired:
@@ -813,6 +826,20 @@ class BisectMaster:
                 return False
 
             logger.info("✓ Kernel repository deployed to slave")
+
+        # Initialize git bisect on slave
+        logger.info("Initializing git bisect on slave...")
+        ret, _stdout, stderr = self.ssh.run_command(
+            f"cd {shlex.quote(self.config.slave_kernel_path)} && "
+            f"git bisect reset >/dev/null 2>&1; "
+            f"git bisect start {shlex.quote(self.bad_commit)} {shlex.quote(self.good_commit)}"
+        )
+
+        if ret != 0:
+            logger.error(f"Failed to initialize git bisect: {stderr}")
+            return False
+
+        logger.info("✓ Git bisect initialized")
 
         # Initialize protection on slave
         logger.info("Initializing kernel protection on slave...")
@@ -879,13 +906,19 @@ class BisectMaster:
     def get_next_commit(self) -> Optional[str]:
         """Get next commit to test using git bisect.
 
+        After git bisect is initialized and commits are marked, git automatically
+        checks out the next commit to test. This method simply returns the current
+        HEAD commit that git bisect has checked out.
+
         Returns:
             Commit SHA or None if bisection complete
         """
-        ret, stdout, stderr = self.ssh.run_command(f"cd {self.config.slave_kernel_path} && git bisect start {self.bad_commit} {self.good_commit} >/dev/null 2>&1 && git rev-parse HEAD")
+        ret, stdout, stderr = self.ssh.run_command(
+            f"cd {shlex.quote(self.config.slave_kernel_path)} && git rev-parse HEAD"
+        )
 
         if ret != 0:
-            logger.error(f"Failed to get next commit: {stderr}")
+            logger.error(f"Failed to get current commit: {stderr}")
             return None
 
         commit = stdout.strip()
@@ -1366,7 +1399,9 @@ class BisectMaster:
             logger.error(f"Cannot mark commit with result: {result}")
             return False
 
-        ret, _stdout, stderr = self.ssh.run_command(f"cd {self.config.slave_kernel_path} && {bisect_cmd}")
+        ret, _stdout, stderr = self.ssh.run_command(
+            f"cd {shlex.quote(self.config.slave_kernel_path)} && {bisect_cmd}"
+        )
 
         if ret != 0:
             logger.error(f"Failed to mark commit: {stderr}")
@@ -1395,25 +1430,25 @@ class BisectMaster:
             is_timeout: Whether failure was due to timeout
         """
         if is_timeout:
-            logger.error("✗ Boot timeout or failure!")
+            logger.error("✗ Boot timeout - slave did not respond!")
             logger.error(f"  Expected kernel: {expected_kernel_ver}")
             logger.error("  Slave did not respond within timeout")
         else:
-            logger.error("✗ Kernel panic detected!")
+            logger.error("✗ Boot failure - kernel version mismatch!")
             logger.error(f"  Expected: {expected_kernel_ver}")
             logger.error(f"  Actual:   {actual_kernel_ver}")
-            logger.error("  Test kernel failed to boot, fell back to protected kernel")
+            logger.error("  Test kernel failed to boot, system fell back to protected kernel")
 
         # Determine result based on test type
         if self.config.test_type == "boot" or not self.config.test_script:
             # Boot test mode: non-bootable kernel is BAD
             iteration.result = TestResult.BAD
-            iteration.error = "Boot timeout - kernel failed to boot" if is_timeout else "Kernel panic detected - kernel failed to boot"
+            iteration.error = "Boot timeout - kernel failed to boot" if is_timeout else "Boot failure - kernel version mismatch (wrong kernel booted)"
             result_str = "bad"
         else:
             # Custom test mode: can't test functionality if kernel doesn't boot
             iteration.result = TestResult.SKIP
-            iteration.error = "Boot timeout - cannot test functionality, skipping commit" if is_timeout else "Kernel panic detected - cannot test functionality, skipping commit"
+            iteration.error = "Boot timeout - cannot test functionality, skipping commit" if is_timeout else "Boot failure - cannot test functionality (wrong kernel booted)"
             result_str = "skip"
 
         # CRITICAL: Only mark commit if SSH is working
@@ -1618,7 +1653,9 @@ class BisectMaster:
             logger.info(f"Result: {iteration.result.value}")
 
             # Check if bisection is done
-            _ret, stdout, _ = self.ssh.run_command(f"cd {self.config.slave_kernel_path} && git bisect log | tail -1")
+            _ret, stdout, _ = self.ssh.run_command(
+                f"cd {shlex.quote(self.config.slave_kernel_path)} && git bisect log | tail -1"
+            )
 
             if "is the first bad commit" in stdout:
                 logger.info("\n=== Bisection Found First Bad Commit! ===")
@@ -1678,7 +1715,9 @@ class BisectMaster:
             logger.info(f"{iteration.iteration:3d}. {iteration.commit_short} | {status:7s} | {duration:6s} | {iteration.commit_message[:50]}")
 
         # Get final result from git bisect
-        ret, stdout, _ = self.ssh.run_command(f"cd {self.config.slave_kernel_path} && git bisect log | grep 'first bad commit' -A 5")
+        ret, stdout, _ = self.ssh.run_command(
+            f"cd {shlex.quote(self.config.slave_kernel_path)} && git bisect log | grep 'first bad commit' -A 5"
+        )
 
         if ret == 0 and stdout:
             logger.info("\n" + "=" * 60)

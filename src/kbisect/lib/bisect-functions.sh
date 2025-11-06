@@ -11,7 +11,7 @@ METADATA_DIR="${BISECT_DIR}/metadata"
 KERNEL_PATH="${KERNEL_PATH:-/root/kernel}"
 
 # Configuration defaults
-BOOT_MIN_FREE_MB=${BOOT_MIN_FREE_MB:-500}
+BOOT_MIN_FREE_MB=${BOOT_MIN_FREE_MB:-200}
 KEEP_TEST_KERNELS=${KEEP_TEST_KERNELS:-2}
 
 # ============================================================================
@@ -42,7 +42,21 @@ EOF
     # This protected kernel remains as the default that GRUB falls back to
     # when test kernels fail to boot (via grub-reboot one-time boot)
     if command -v grubby &> /dev/null; then
-        grubby --set-default="/boot/vmlinuz-${current_kernel}" 2>/dev/null
+        if ! grubby --set-default="/boot/vmlinuz-${current_kernel}" 2>&1; then
+            echo "ERROR: Failed to set permanent default kernel" >&2
+            return 1
+        fi
+
+        # Verify it was set
+        local default_kernel=$(grubby --default-kernel 2>/dev/null)
+        if [ "$default_kernel" != "/boot/vmlinuz-${current_kernel}" ]; then
+            echo "ERROR: Default kernel verification failed" >&2
+            echo "  Expected: /boot/vmlinuz-${current_kernel}" >&2
+            echo "  Actual: $default_kernel" >&2
+            return 1
+        fi
+
+        echo "✓ Permanent default kernel set: $current_kernel" >&2
     fi
 
     # Configure GRUB for one-time boot support
@@ -175,11 +189,40 @@ verify_grub_config() {
 check_disk_space() {
     local min_mb="${1:-$BOOT_MIN_FREE_MB}"
     local free_mb=$(df -BM /boot | awk 'NR==2 {gsub(/M/,"",$4); print $4}')
-    [ "$free_mb" -gt "$min_mb" ]
+    local total_mb=$(df -BM /boot | awk 'NR==2 {gsub(/M/,"",$2); print $2}')
+    local used_mb=$(df -BM /boot | awk 'NR==2 {gsub(/M/,"",$3); print $3}')
+
+    echo "/boot disk space: ${free_mb}MB free / ${total_mb}MB total (${used_mb}MB used)" >&2
+
+    if [ "$free_mb" -gt "$min_mb" ]; then
+        echo "✓ Sufficient space (${free_mb}MB > ${min_mb}MB required)" >&2
+        return 0
+    else
+        echo "⚠ Low space: ${free_mb}MB available, ${min_mb}MB required" >&2
+        return 1
+    fi
 }
 
 get_disk_space() {
     df -BM /boot | awk 'NR==2 {gsub(/M/,"",$4); print $4}'
+}
+
+verify_onetime_boot() {
+    # Check if saved_entry is set (indicates one-time boot is configured)
+    local saved_entry=""
+    if command -v grub2-editenv &> /dev/null; then
+        saved_entry=$(grub2-editenv list 2>/dev/null | grep '^saved_entry=' | cut -d= -f2)
+    elif command -v grub-editenv &> /dev/null; then
+        saved_entry=$(grub-editenv list 2>/dev/null | grep '^saved_entry=' | cut -d= -f2)
+    fi
+
+    if [ -z "$saved_entry" ]; then
+        echo "⚠ WARNING: saved_entry is not set!" >&2
+        return 1
+    fi
+
+    echo "✓ One-time boot entry set: $saved_entry" >&2
+    return 0
 }
 
 # ============================================================================
@@ -289,14 +332,42 @@ build_kernel() {
     local kernel_path="${2:-$KERNEL_PATH}"
     local kernel_config="${3:-}"
 
+    echo "====================================================================" >&2
     echo "Building kernel for commit: $commit" >&2
+    echo "====================================================================" >&2
 
-    # Check disk space first
+    # ALWAYS run cleanup BEFORE build to prevent space issues
+    # This is critical because make install can fail with no space before cleanup runs
+    echo "" >&2
+    echo "Pre-build cleanup (keep 1 kernel)..." >&2
+    cleanup_old_kernels 1
+
+    echo "" >&2
+    echo "Removing all kdump files to save space..." >&2
+    cleanup_all_kdump_files
+
+    echo "" >&2
+    echo "Checking disk space..." >&2
     if ! check_disk_space; then
-        echo "Low disk space, cleaning up..." >&2
-        cleanup_old_kernels
+        echo "" >&2
+        echo "⚠ Still low on space after cleanup!" >&2
+        echo "Running EMERGENCY cleanup (keep 0 kernels)..." >&2
+        cleanup_old_kernels 0
+
+        echo "" >&2
+        echo "Final space check..." >&2
+        if ! check_disk_space; then
+            echo "" >&2
+            echo "✗✗✗ CRITICAL: Cannot free enough space for build!" >&2
+            echo "Manual intervention required:" >&2
+            echo "  1. SSH to slave and check /boot contents" >&2
+            echo "  2. Manually remove old kernels if needed" >&2
+            echo "  3. Verify protected kernel is intact" >&2
+            return 1
+        fi
     fi
 
+    echo "" >&2
     cd "$kernel_path" || return 1
 
     # Reset repository to clean state before checkout
@@ -383,55 +454,55 @@ build_kernel() {
     # Set as next boot (ONE-TIME BOOT)
     # This ensures that if the kernel panics, next reboot automatically falls back
     # to the protected kernel (which remains as permanent default)
-    local boot_set=false
+    echo "Setting one-time boot for: $kernel_version" >&2
+
     if command -v grub2-reboot &> /dev/null; then
-        # RHEL/Fedora/Rocky - Use grub2-editenv for reliable one-time boot
-        echo "Setting one-time boot for: $kernel_version" >&2
+        # RHEL/Fedora/Rocky - Use BLS entry ID (for RHEL 8+, Fedora 30+)
+        # On BLS systems, entry IDs are in format: <machine-id>-<kernel-version>
+        local entry_id=$(grubby --info="$bootfile" 2>/dev/null | grep '^id=' | cut -d= -f2 | tr -d '"')
 
-        # Method 1: Try grub2-reboot with kernel version (works on BLS-based systems)
-        if grub2-reboot "$kernel_version" 2>/dev/null; then
-            boot_set=true
-            echo "✓ Set one-time boot via grub2-reboot (BLS)" >&2
-        else
-            # Method 2: Use grub2-editenv to directly set saved_entry
-            # This is more reliable than grub2-reboot on older systems
-            local entry_index=$(grubby --info="$bootfile" 2>/dev/null | grep '^index=' | cut -d= -f2)
-
-            if [ -n "$entry_index" ]; then
-                # Try setting saved_entry with numeric index first
-                if grub2-editenv - set saved_entry="$entry_index" 2>/dev/null; then
-                    boot_set=true
-                    echo "✓ Set one-time boot via grub2-editenv (index: $entry_index)" >&2
-                else
-                    # Method 3: Try getting menu entry ID from grubby
-                    local menu_id=$(grubby --info="$bootfile" 2>/dev/null | grep '^id=' | cut -d= -f2 | tr -d '"')
-                    if [ -n "$menu_id" ]; then
-                        if grub2-editenv - set saved_entry="$menu_id" 2>/dev/null; then
-                            boot_set=true
-                            echo "✓ Set one-time boot via grub2-editenv (menu ID: $menu_id)" >&2
-                        fi
-                    fi
-                fi
-            fi
-
-            # If all grub2 methods failed, do NOT fall back to permanent default
-            if [ "$boot_set" != "true" ]; then
-                echo "ERROR: All grub2 one-time boot methods failed" >&2
-                echo "  Tried: grub2-reboot, grub2-editenv with index and menu ID" >&2
-                echo "  Refusing to set permanent default - bisection safety risk" >&2
-                return 1
-            fi
+        if [ -z "$entry_id" ]; then
+            echo "ERROR: Cannot determine BLS entry ID for kernel" >&2
+            echo "  Kernel: $kernel_version" >&2
+            echo "  Boot file: $bootfile" >&2
+            echo "  This system may not be using BLS" >&2
+            return 1
         fi
+
+        echo "BLS entry ID: $entry_id" >&2
+
+        if ! grub2-reboot "$entry_id" 2>&1; then
+            echo "ERROR: grub2-reboot failed with BLS entry ID" >&2
+            echo "  Tried: grub2-reboot \"$entry_id\"" >&2
+            return 1
+        fi
+
+        # Verify it was set
+        if ! verify_onetime_boot; then
+            echo "ERROR: One-time boot verification failed" >&2
+            echo "  grub2-reboot command succeeded but saved_entry was not set" >&2
+            return 1
+        fi
+
+        echo "✓ One-time boot configured (BLS ID: $entry_id)" >&2
+
     elif command -v grub-reboot &> /dev/null; then
-        # Debian/Ubuntu - use grub-reboot with kernel version
-        echo "Setting one-time boot for: $kernel_version" >&2
-        if grub-reboot "$kernel_version" 2>/dev/null; then
-            boot_set=true
-            echo "✓ Set one-time boot via grub-reboot" >&2
-        else
+        # Debian/Ubuntu - Use kernel version
+        echo "Using grub-reboot for: $kernel_version" >&2
+
+        if ! grub-reboot "$kernel_version" 2>&1; then
             echo "ERROR: grub-reboot failed for kernel $kernel_version" >&2
             return 1
         fi
+
+        # Verify it was set
+        if ! verify_onetime_boot; then
+            echo "ERROR: One-time boot verification failed" >&2
+            return 1
+        fi
+
+        echo "✓ One-time boot configured via grub-reboot" >&2
+
     else
         # No one-time boot mechanism available
         echo "ERROR: No one-time boot mechanism available!" >&2
@@ -441,17 +512,15 @@ build_kernel() {
         return 1
     fi
 
-    if [ "$boot_set" != "true" ]; then
-        echo "ERROR: Failed to set boot kernel" >&2
-        return 1
-    fi
-
     # Restore Makefile
     git restore Makefile
     rm -f Makefile.bisect-backup
 
-    # Cleanup after build
-    cleanup_old_kernels
+    # Post-build cleanup (keep 2 kernels for comparison/rollback)
+    # This is less aggressive than pre-build cleanup since the new kernel is now installed
+    echo "" >&2
+    echo "Post-build cleanup (keep 2 kernels)..." >&2
+    cleanup_old_kernels 2
 
     # Output kernel version (for master to capture)
     echo "$kernel_version"
@@ -466,61 +535,187 @@ cleanup_old_kernels() {
     local keep_count="${1:-$KEEP_TEST_KERNELS}"
     local current_kernel=$(uname -r)
 
-    echo "Cleaning up old bisect kernels (keeping $keep_count)..." >&2
+    echo "=== Kernel Cleanup Starting ===" >&2
+    echo "Keep count: $keep_count" >&2
+    echo "Current kernel: $current_kernel" >&2
 
     # Get bisect kernels sorted by modification time (oldest first)
     local bisect_kernels=($(ls -t /boot/vmlinuz-*-bisect-* 2>/dev/null | tac))
     local total=${#bisect_kernels[@]}
 
+    echo "Found $total bisect kernel(s)" >&2
+
+    # List all found kernels for debugging
+    if [ "$total" -gt 0 ]; then
+        echo "Bisect kernels (oldest → newest):" >&2
+        for kernel_file in "${bisect_kernels[@]}"; do
+            local version=$(basename "$kernel_file" | sed 's/vmlinuz-//')
+            local size=$(du -sh "/boot/vmlinuz-${version}" 2>/dev/null | cut -f1 || echo "?")
+            echo "  - $version ($size)" >&2
+        done
+    fi
+
     if [ "$total" -le "$keep_count" ]; then
-        echo "No cleanup needed ($total kernels)" >&2
+        echo "No cleanup needed ($total <= $keep_count)" >&2
+        echo "=== Cleanup Complete: No action taken ===" >&2
         return 0
     fi
 
     local remove_count=$((total - keep_count))
-    echo "Removing $remove_count old kernel(s)..." >&2
+    echo "Need to remove $remove_count kernel(s) to keep $keep_count" >&2
+    echo "" >&2
 
     local removed=0
-    for kernel_path in "${bisect_kernels[@]}"; do
+    local failed=0
+    for kernel_file in "${bisect_kernels[@]}"; do
         [ "$removed" -ge "$remove_count" ] && break
 
-        local version=$(basename "$kernel_path" | sed 's/vmlinuz-//')
+        local version=$(basename "$kernel_file" | sed 's/vmlinuz-//')
 
         # Triple safety checks
-        if is_protected "$kernel_path"; then
+        if is_protected "$kernel_file"; then
             echo "SKIP: $version (protected)" >&2
             continue
         fi
 
         if [[ "$version" == "$current_kernel" ]]; then
-            echo "SKIP: $version (current)" >&2
+            echo "SKIP: $version (currently running)" >&2
             continue
         fi
 
         if [[ "$version" != *"-bisect-"* ]]; then
-            echo "SKIP: $version (not bisect kernel)" >&2
+            echo "SKIP: $version (not a bisect kernel)" >&2
             continue
         fi
 
-        # Remove files
-        rm -f "/boot/vmlinuz-${version}" 2>/dev/null
-        rm -f "/boot/initramfs-${version}.img" 2>/dev/null
-        rm -f "/boot/System.map-${version}" 2>/dev/null
-        rm -f "/boot/config-${version}" 2>/dev/null
-        rm -rf "/lib/modules/${version}/" 2>/dev/null
+        echo "Removing: $version" >&2
 
-        echo "Removed: $version" >&2
-        removed=$((removed + 1))
+        # Remove files with error checking
+        local removal_failed=false
+
+        if [ -f "/boot/vmlinuz-${version}" ]; then
+            if ! rm -f "/boot/vmlinuz-${version}" 2>&1; then
+                echo "  ✗ Failed to remove /boot/vmlinuz-${version}" >&2
+                removal_failed=true
+            elif [ -f "/boot/vmlinuz-${version}" ]; then
+                echo "  ✗ /boot/vmlinuz-${version} still exists after removal" >&2
+                removal_failed=true
+            else
+                echo "  ✓ Removed /boot/vmlinuz-${version}" >&2
+            fi
+        fi
+
+        if [ -f "/boot/initramfs-${version}.img" ]; then
+            if ! rm -f "/boot/initramfs-${version}.img" 2>&1; then
+                echo "  ✗ Failed to remove /boot/initramfs-${version}.img" >&2
+                removal_failed=true
+            else
+                echo "  ✓ Removed /boot/initramfs-${version}.img" >&2
+            fi
+        fi
+
+        if [ -f "/boot/initramfs-${version}kdump.img" ]; then
+            if ! rm -f "/boot/initramfs-${version}kdump.img" 2>&1; then
+                echo "  ✗ Failed to remove /boot/initramfs-${version}kdump.img" >&2
+            else
+                echo "  ✓ Removed /boot/initramfs-${version}kdump.img" >&2
+            fi
+        fi
+
+        if [ -f "/boot/System.map-${version}" ]; then
+            rm -f "/boot/System.map-${version}" 2>&1 || echo "  ⚠ Failed to remove System.map" >&2
+        fi
+
+        if [ -f "/boot/config-${version}" ]; then
+            rm -f "/boot/config-${version}" 2>&1 || echo "  ⚠ Failed to remove config" >&2
+        fi
+
+        if [ -d "/lib/modules/${version}/" ]; then
+            if ! rm -rf "/lib/modules/${version}/" 2>&1; then
+                echo "  ✗ Failed to remove /lib/modules/${version}/" >&2
+            else
+                echo "  ✓ Removed /lib/modules/${version}/" >&2
+            fi
+        fi
+
+        if [ "$removal_failed" = "true" ]; then
+            echo "  ✗ Removal FAILED for $version" >&2
+            failed=$((failed + 1))
+        else
+            echo "  ✓ Successfully removed $version" >&2
+            removed=$((removed + 1))
+        fi
+        echo "" >&2
     done
 
     # Verify protection still intact
-    verify_protection || {
-        echo "WARNING: Protection verification failed!" >&2
+    if ! verify_protection; then
+        echo "✗✗✗ CRITICAL: Protection verification failed! ✗✗✗" >&2
         return 1
-    }
+    fi
 
-    echo "Cleanup complete: removed $removed kernel(s)" >&2
-    return 0
+    # Show final status
+    echo "=== Cleanup Complete ===" >&2
+    echo "Successfully removed: $removed kernel(s)" >&2
+    [ "$failed" -gt 0 ] && echo "Failed to remove: $failed kernel(s)" >&2
+
+    # Show remaining space
+    local free_mb=$(get_disk_space)
+    echo "/boot free space: ${free_mb}MB" >&2
+    echo "======================" >&2
+
+    [ "$failed" -eq 0 ]
+}
+
+cleanup_all_kdump_files() {
+    echo "=== Removing All kdump Files ===" >&2
+    echo "kdump files are large and not needed for bisection" >&2
+
+    local removed=0
+    local failed=0
+    local total=0
+
+    # Count kdump files first
+    for kdump_file in /boot/initramfs-*kdump.img; do
+        [ -f "$kdump_file" ] || continue
+        total=$((total + 1))
+    done
+
+    if [ "$total" -eq 0 ]; then
+        echo "No kdump files found" >&2
+        echo "=======================" >&2
+        return 0
+    fi
+
+    echo "Found $total kdump file(s)" >&2
+    echo "" >&2
+
+    # Remove all kdump files (including protected kernel's kdump)
+    for kdump_file in /boot/initramfs-*kdump.img; do
+        [ -f "$kdump_file" ] || continue
+
+        local filename=$(basename "$kdump_file")
+        local size=$(du -sh "$kdump_file" 2>/dev/null | cut -f1 || echo "?")
+
+        if rm -f "$kdump_file" 2>&1; then
+            echo "  ✓ Removed $filename ($size)" >&2
+            removed=$((removed + 1))
+        else
+            echo "  ✗ Failed to remove $filename" >&2
+            failed=$((failed + 1))
+        fi
+    done
+
+    echo "" >&2
+    echo "=== kdump Cleanup Complete ===" >&2
+    echo "Removed: $removed file(s)" >&2
+    [ "$failed" -gt 0 ] && echo "Failed: $failed file(s)" >&2
+
+    local free_mb=$(get_disk_space)
+    echo "/boot free space: ${free_mb}MB" >&2
+    echo "===========================" >&2
+
+    [ "$failed" -eq 0 ]
 }
 
 list_kernels() {
