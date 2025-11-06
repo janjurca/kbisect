@@ -524,12 +524,6 @@ build_kernel() {
     git restore Makefile
     rm -f Makefile.bisect-backup
 
-    # Post-build cleanup (keep 2 kernels for comparison/rollback)
-    # This is less aggressive than pre-build cleanup since the new kernel is now installed
-    echo "" >&2
-    echo "Post-build cleanup (keep 2 kernels)..." >&2
-    cleanup_old_kernels 2
-
     # Output kernel version (for master to capture)
     echo "$kernel_version"
     return 0

@@ -88,13 +88,9 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
     Returns:
         BisectConfig object
     """
-    # Get kernel config settings (CLI args override config file)
-    kernel_config_file = getattr(args, "kernel_config", None) or config_dict.get(
-        "kernel_config", {}
-    ).get("config_file")
-    use_running_config = getattr(args, "use_running_config", False) or config_dict.get(
-        "kernel_config", {}
-    ).get("use_running_config", False)
+    # Get kernel config settings from config file only
+    kernel_config_file = config_dict.get("kernel_config", {}).get("config_file")
+    use_running_config = config_dict.get("kernel_config", {}).get("use_running_config", False)
 
     # Get metadata settings from config
     metadata_config = config_dict.get("metadata", {})
@@ -102,13 +98,10 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
     # Get console log settings from config file
     console_logs_config = config_dict.get("console_logs", {})
     collect_console_logs = console_logs_config.get("enabled", False)
+    console_collector_type = console_logs_config.get("collector", "auto")
 
-    console_collector_type = getattr(args, "console_collector", None) or console_logs_config.get(
-        "collector", "auto"
-    )
-
-    # Get slave host (CLI arg overrides config)
-    slave_host = getattr(args, "slave_host", None) or config_dict["slave"]["hostname"]
+    # Get slave host from config only
+    slave_host = config_dict["slave"]["hostname"]
 
     return BisectConfig(
         slave_host=slave_host,
@@ -154,7 +147,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     config_dict = load_config(args.config)
 
     # Check and deploy slave if needed
-    slave_host = args.slave_host or config_dict["slave"]["hostname"]
+    slave_host = config_dict["slave"]["hostname"]
     slave_user = config_dict["slave"].get("ssh_user", "root")
     deploy_path = config_dict["slave"].get("bisect_path", "/root/kernel-bisect/lib")
     auto_deploy = config_dict.get("deployment", {}).get("auto_deploy", True)
@@ -250,7 +243,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
         # Verify slave connectivity before resuming
         print("\nVerifying slave connectivity...")
-        slave_host = getattr(args, "slave_host", None) or config_dict["slave"]["hostname"]
+        slave_host = config_dict["slave"]["hostname"]
         slave_user = config_dict["slave"].get("ssh_user", "root")
 
         from kbisect.master.bisect_master import SSHClient
@@ -846,7 +839,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # Load config
     config_dict = load_config(args.config)
 
-    slave_host = args.slave_host or config_dict["slave"]["hostname"]
+    slave_host = config_dict["slave"]["hostname"]
     slave_user = config_dict["slave"].get("ssh_user", "root")
     deploy_path = config_dict["slave"].get("bisect_path", "/root/kernel-bisect/lib")
 
@@ -948,20 +941,10 @@ def create_parser() -> argparse.ArgumentParser:
     parser_init = subparsers.add_parser("init", help="Initialize bisection")
     parser_init.add_argument("good_commit", help="Known good commit")
     parser_init.add_argument("bad_commit", help="Known bad commit")
-    parser_init.add_argument("--slave-host", help="Slave hostname (override config)")
     parser_init.add_argument(
         "--force-deploy",
         action="store_true",
         help="Force deployment even if auto_deploy is disabled",
-    )
-    parser_init.add_argument("--kernel-config", help="Path to kernel .config file to use as base")
-    parser_init.add_argument(
-        "--use-running-config", action="store_true", help="Use running kernel config as base"
-    )
-    parser_init.add_argument(
-        "--console-collector",
-        choices=["conserver", "ipmi", "auto"],
-        help="Console collector type (overrides config)",
     )
 
     # start command
@@ -969,18 +952,6 @@ def create_parser() -> argparse.ArgumentParser:
     parser_start.add_argument("good_commit", nargs="?", help="Known good commit")
     parser_start.add_argument("bad_commit", nargs="?", help="Known bad commit")
     parser_start.add_argument("--reinit", action="store_true", help="Reinitialize bisection")
-    parser_start.add_argument("--kernel-config", help="Path to kernel .config file to use as base")
-    parser_start.add_argument(
-        "--use-running-config", action="store_true", help="Use running kernel config as base"
-    )
-    parser_start.add_argument(
-        "--slave-host", help="Slave hostname (override config)"
-    )
-    parser_start.add_argument(
-        "--console-collector",
-        choices=["conserver", "ipmi", "auto"],
-        help="Console collector type (overrides config)",
-    )
 
     # status command
     subparsers.add_parser("status", help="Show bisection status")
@@ -1012,7 +983,6 @@ def create_parser() -> argparse.ArgumentParser:
 
     # deploy command
     parser_deploy = subparsers.add_parser("deploy", help="Deploy slave components")
-    parser_deploy.add_argument("--slave-host", help="Slave hostname (override config)")
     parser_deploy.add_argument(
         "--verify-only", action="store_true", help="Only verify deployment, do not deploy"
     )
