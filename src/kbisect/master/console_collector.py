@@ -145,8 +145,10 @@ class ConserverCollector(ConsoleCollector):
                 ["console", self.hostname],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,  # Prevent interactive prompts
                 text=True,
                 bufsize=1,  # Line buffered
+                start_new_session=True,  # Detach from controlling terminal
             )
 
             # Give process a moment to fail fast if auth/connection issues
