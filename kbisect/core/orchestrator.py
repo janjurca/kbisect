@@ -367,8 +367,9 @@ class BisectMaster:
         # Create collector
         collector = create_console_collector(
             hostname=console_hostname,
-            collector_type=self.config.console_collector_type,
-            ipmi_controller=self.ipmi_controller,
+            ipmi_host=self.config.ipmi_host,
+            ipmi_user=self.config.ipmi_user,
+            ipmi_password=self.config.ipmi_password,
         )
 
         if not collector:
