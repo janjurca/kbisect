@@ -1,5 +1,7 @@
 """Console collectors for capturing boot logs during kernel testing."""
 
+from typing import Optional
+
 from kbisect.collectors.base import ConsoleCollector
 from kbisect.collectors.conserver import ConserverCollector
 from kbisect.collectors.ipmi_sol import IPMISOLCollector
@@ -13,9 +15,9 @@ __all__ = [
 
 def create_console_collector(
     hostname: str,
-    ipmi_host: str | None = None,
-    ipmi_user: str | None = None,
-    ipmi_password: str | None = None,
+    ipmi_host: Optional[str] = None,
+    ipmi_user: Optional[str] = None,
+    ipmi_password: Optional[str] = None,
 ) -> ConsoleCollector:
     """
     Create appropriate console collector based on available tools.
