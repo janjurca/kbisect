@@ -950,6 +950,58 @@ class StateManager:
         finally:
             session.close()
 
+    def update_metadata(
+        self,
+        metadata_id: int,
+        metadata_dict: Dict[str, Any],
+    ) -> bool:
+        """Update existing metadata record with new data.
+
+        Args:
+            metadata_id: Metadata ID to update
+            metadata_dict: New metadata dictionary
+
+        Returns:
+            True if updated successfully, False otherwise
+
+        Raises:
+            DatabaseError: If metadata update fails
+        """
+        session = self.Session()
+        try:
+            # Get existing metadata record
+            stmt = select(Metadata).where(Metadata.metadata_id == metadata_id)
+            existing = session.execute(stmt).scalar_one_or_none()
+
+            if not existing:
+                logger.warning(f"Metadata record {metadata_id} not found for update")
+                return False
+
+            # Update metadata fields
+            metadata_json = json.dumps(metadata_dict, sort_keys=True)
+            metadata_hash = hashlib.sha256(metadata_json.encode()).hexdigest()
+
+            existing.metadata_json = metadata_json
+            existing.metadata_hash = metadata_hash
+            existing.collection_time = metadata_dict.get(
+                "collection_time", existing.collection_time
+            )
+            existing.collection_type = metadata_dict.get(
+                "collection_type", existing.collection_type
+            )
+
+            session.commit()
+            logger.debug(f"Updated metadata record {metadata_id}")
+            return True
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to update metadata: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
     def get_metadata(self, metadata_id: int) -> Optional[Dict[str, Any]]:
         """Get metadata by ID.
 

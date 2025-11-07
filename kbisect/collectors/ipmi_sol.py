@@ -158,7 +158,7 @@ class IPMISOLCollector(ConsoleCollector):
                 buffer_size = len(self.buffer)
 
             duration = self.get_duration()
-            logger.debug(f"Stopped IPMI SOL collection: {buffer_size} lines, {duration:.1f}s}")
+            logger.debug(f"Stopped IPMI SOL collection: {buffer_size} lines, {duration:.1f}s")
 
         except Exception as exc:
             logger.error(f"Error stopping IPMI SOL collection: {exc}")

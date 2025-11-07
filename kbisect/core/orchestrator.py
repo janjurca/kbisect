@@ -211,8 +211,40 @@ class BisectMaster:
                 self.config.test_script = remote_script_path
                 logger.debug(f"Resolved test script to slave path: {remote_script_path}")
 
+    def create_iteration_metadata_record(self, iteration_id: int) -> Optional[int]:
+        """Create a minimal metadata record for an iteration.
+
+        This creates a placeholder metadata record that can be used to link
+        files (like kernel configs) before full metadata collection occurs.
+
+        Args:
+            iteration_id: Iteration ID for this metadata record
+
+        Returns:
+            Metadata ID if created successfully, None otherwise
+        """
+        # Create minimal metadata record
+        minimal_metadata = {
+            "collection_type": "iteration",
+            "collection_time": datetime.now().isoformat(),
+            "note": "Placeholder record - will be updated with full metadata after boot",
+        }
+
+        try:
+            metadata_id = self.state.store_metadata(
+                self.session_id, minimal_metadata, iteration_id
+            )
+            logger.debug(f"Created placeholder metadata record (id: {metadata_id}) for iteration {iteration_id}")
+            return metadata_id
+        except Exception as exc:
+            logger.warning(f"Failed to create placeholder metadata record: {exc}")
+            return None
+
     def collect_and_store_metadata(self, collection_type: str, iteration_id: Optional[int] = None) -> bool:
         """Collect metadata from slave and store in database.
+
+        If a placeholder metadata record already exists for this iteration,
+        it will be updated with the full metadata instead of creating a new record.
 
         Args:
             collection_type: Type of metadata to collect
@@ -238,7 +270,20 @@ class BisectMaster:
             logger.debug(f"Raw output: {stdout}")
             return False
 
-        # Store in database
+        # Check if a placeholder metadata record already exists for this iteration
+        if iteration_id:
+            metadata_list = self.state.get_session_metadata(self.session_id, collection_type)
+            if metadata_list:
+                # Find metadata for this iteration
+                iteration_metadata = [m for m in metadata_list if m.get("iteration_id") == iteration_id]
+                if iteration_metadata:
+                    # Update existing placeholder record instead of creating new one
+                    metadata_id = iteration_metadata[0]["metadata_id"]
+                    self.state.update_metadata(metadata_id, metadata_dict)
+                    logger.debug(f"✓ Updated existing {collection_type} metadata record (id: {metadata_id})")
+                    return True
+
+        # No existing record found - create new one
         self.state.store_metadata(self.session_id, metadata_dict, iteration_id)
         logger.debug(f"✓ Stored {collection_type} metadata")
 
@@ -274,19 +319,35 @@ class BisectMaster:
 
         # Store config content directly in database
         metadata_list = self.state.get_session_metadata(self.session_id, "iteration")
-        if metadata_list:
-            # Find metadata for this iteration
-            iteration_metadata = [m for m in metadata_list if m.get("iteration_id") == iteration_id]
-            if iteration_metadata:
-                metadata_id = iteration_metadata[0]["metadata_id"]
-                # Store content as bytes in database (compressed)
-                config_content = stdout.encode("utf-8")
-                file_id = self.state.store_metadata_file_content(metadata_id, "kernel_config", config_content, compress=True)
-                logger.info(f"✓ Captured kernel config from build directory in DB (file_id: {file_id})")
-                return True
+        if not metadata_list:
+            logger.error(
+                f"Could not find any metadata records for session {self.session_id}. "
+                "This should not happen - metadata record should be created before kernel config capture."
+            )
+            return False
 
-        logger.warning("Could not find metadata record to link kernel config")
-        return False
+        # Find metadata for this iteration
+        iteration_metadata = [m for m in metadata_list if m.get("iteration_id") == iteration_id]
+        if not iteration_metadata:
+            logger.error(
+                f"Could not find metadata record for iteration {iteration_id}. "
+                f"Found {len(metadata_list)} metadata records but none match this iteration. "
+                "Ensure create_iteration_metadata_record() is called before kernel config capture."
+            )
+            return False
+
+        metadata_id = iteration_metadata[0]["metadata_id"]
+        try:
+            # Store content as bytes in database (compressed)
+            config_content = stdout.encode("utf-8")
+            file_id = self.state.store_metadata_file_content(
+                metadata_id, "kernel_config", config_content, compress=True
+            )
+            logger.info(f"✓ Captured kernel config from build directory in DB (file_id: {file_id})")
+            return True
+        except Exception as exc:
+            logger.error(f"Failed to store kernel config in database: {exc}")
+            return False
 
     def _start_console_collection(self) -> Optional["ConsoleCollector"]:
         """Start console log collection for boot cycle.
@@ -1291,6 +1352,9 @@ class BisectMaster:
             logger.warning("  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)")
             success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
 
+        if not success:
+            logger.error(f"Failed to mark commit in git bisect - bisection state may be inconsistent")
+
         self.state.update_iteration(
             iteration_id,
             final_result=result_str,
@@ -1351,11 +1415,15 @@ class BisectMaster:
                     end = datetime.fromisoformat(iteration.end_time)
                     iteration.duration = int((end - start).total_seconds())
 
-                _, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+                success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+                if not success:
+                    logger.error("Failed to mark commit as SKIP in git bisect - bisection state may be inconsistent")
+                    iteration.error = "Build failed (git bisect mark failed)"
+
                 self.state.update_iteration(
                     iteration_id,
                     final_result="skip",
-                    error_message="Build failed",
+                    error_message=iteration.error or "Build failed",
                     end_time=iteration.end_time,
                     duration=iteration.duration
                 )
@@ -1364,6 +1432,11 @@ class BisectMaster:
             # Kernel version was extracted from build output
             if not expected_kernel_ver:
                 logger.warning("Could not determine kernel version from build output")
+
+            # Create placeholder metadata record before capturing kernel config
+            # This ensures kernel config has a metadata record to link to
+            if self.config.collect_kernel_config and expected_kernel_ver:
+                self.create_iteration_metadata_record(iteration_id)
 
             # Capture kernel config immediately after build (before reboot/cleanup)
             # Config file is guaranteed to exist in kernel build directory at this point
@@ -1449,7 +1522,10 @@ class BisectMaster:
             )
 
             # Mark in git bisect
-            _, bisection_complete = self.mark_commit(commit_sha, test_result)
+            success, bisection_complete = self.mark_commit(commit_sha, test_result)
+            if not success:
+                logger.error(f"Failed to mark commit as {test_result.value.upper()} in git bisect - bisection state may be inconsistent")
+                # Don't abort here since the test completed - just log the error
 
         except Exception as exc:
             logger.error(f"Iteration failed with exception: {exc}")
@@ -1506,6 +1582,11 @@ class BisectMaster:
         MAX_ITERATIONS = 1000
         iteration_count = 0
 
+        # Track stuck detection (same commit being tested repeatedly)
+        previous_commit = None
+        same_commit_count = 0
+        MAX_SAME_COMMIT = 3  # Abort if stuck on same commit for this many iterations
+
         while True:
             iteration_count += 1
 
@@ -1525,6 +1606,29 @@ class BisectMaster:
             if not commit:
                 logger.info("No more commits to test - bisection complete!")
                 break
+
+            # Check if we're stuck on the same commit
+            if commit == previous_commit:
+                same_commit_count += 1
+                logger.warning(f"Still on same commit {commit[:8]} (attempt {same_commit_count}/{MAX_SAME_COMMIT})")
+
+                if same_commit_count >= MAX_SAME_COMMIT:
+                    logger.error(
+                        f"STUCK ON SAME COMMIT: Git bisect has returned the same commit {commit[:8]} "
+                        f"for {same_commit_count} consecutive iterations. This indicates git bisect "
+                        f"has run out of viable commits to test, or there's a problem with the repository state. "
+                        f"Stopping bisection."
+                    )
+                    self.state.update_session(
+                        self.session_id,
+                        status="failed",
+                        end_time=datetime.utcnow().isoformat(),
+                    )
+                    return False
+            else:
+                # Reset counter when we move to a different commit
+                same_commit_count = 0
+                previous_commit = commit
 
             # Run iteration
             iteration, bisection_complete = self.run_iteration(commit)
