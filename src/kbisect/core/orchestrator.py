@@ -20,9 +20,10 @@ from typing import TYPE_CHECKING, Callable, Generator, List, Optional, Tuple
 
 
 if TYPE_CHECKING:
-    from kbisect.master.console_collector import ConsoleCollector
-    from kbisect.master.ipmi_controller import IPMIController
+    from kbisect.collectors import ConsoleCollector
+    from kbisect.power import IPMIController
 
+from kbisect.remote import SSHClient
 
 logger = logging.getLogger(__name__)
 
@@ -142,212 +143,6 @@ class BisectIteration:
     error: Optional[str] = None
 
 
-class SSHClient:
-    """SSH client for slave communication.
-
-    Provides methods to execute commands on slave via SSH and copy files.
-
-    Attributes:
-        host: Slave hostname or IP
-        user: SSH username
-    """
-
-    def __init__(self, host: str, user: str = "root") -> None:
-        """Initialize SSH client.
-
-        Args:
-            host: Slave hostname or IP
-            user: SSH username
-        """
-        self.host = host
-        self.user = user
-
-    def run_command(self, command: str, timeout: Optional[int] = None) -> Tuple[int, str, str]:
-        """Run command on slave via SSH.
-
-        Args:
-            command: Command to execute
-            timeout: Command timeout in seconds
-
-        Returns:
-            Tuple of (return_code, stdout, stderr)
-        """
-        ssh_command = [
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "ConnectTimeout=10",
-            f"{self.user}@{self.host}",
-            command,
-        ]
-
-        try:
-            result = subprocess.run(ssh_command, capture_output=True, text=True, timeout=timeout, check=False)
-            return result.returncode, result.stdout, result.stderr
-        except subprocess.TimeoutExpired:
-            logger.error(f"SSH command timed out after {timeout}s")
-            return -1, "", "Timeout"
-        except Exception as exc:
-            logger.error(f"SSH command failed: {exc}")
-            return -1, "", str(exc)
-
-    def is_alive(self) -> bool:
-        """Check if slave is reachable.
-
-        Returns:
-            True if slave responds to SSH, False otherwise
-        """
-        ret, _, _ = self.run_command("echo alive", timeout=5)
-        return ret == 0
-
-    def call_function(
-        self,
-        function_name: str,
-        *args: str,
-        library_path: str = "/root/kernel-bisect/lib/bisect-functions.sh",
-        timeout: Optional[int] = None,
-    ) -> Tuple[int, str, str]:
-        """Call a bash function from the bisect library.
-
-        Args:
-            function_name: Name of the bash function to call
-            *args: Arguments to pass to the function
-            library_path: Path to the bisect library on slave
-            timeout: Command timeout in seconds
-
-        Returns:
-            Tuple of (return_code, stdout, stderr)
-        """
-        # Properly escape arguments to prevent command injection
-        args_str = " ".join(shlex.quote(str(arg)) for arg in args)
-
-        # Source library and call function (quote paths for safety)
-        command = f"source {shlex.quote(library_path)} && {function_name} {args_str}"
-
-        return self.run_command(command, timeout=timeout)
-
-    def call_function_streaming(
-        self,
-        function_name: str,
-        *args: str,
-        library_path: str = "/root/kernel-bisect/lib/bisect-functions.sh",
-        timeout: Optional[int] = None,
-        chunk_callback: Optional[Callable[[str, str], None]] = None,
-    ) -> Tuple[int, str, str]:
-        """Call a bash function and stream output in real-time.
-
-        Args:
-            function_name: Name of the bash function to call
-            *args: Arguments to pass to the function
-            library_path: Path to the bisect library on slave
-            timeout: Command timeout in seconds
-            chunk_callback: Optional callback function(stdout_chunk, stderr_chunk) called as output arrives
-
-        Returns:
-            Tuple of (return_code, stdout, stderr)
-        """
-        # Properly escape arguments to prevent command injection
-        args_str = " ".join(shlex.quote(str(arg)) for arg in args)
-
-        # Source library and call function
-        command = f"source {shlex.quote(library_path)} && {function_name} {args_str}"
-
-        ssh_command = [
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "ConnectTimeout=10",
-            f"{self.user}@{self.host}",
-            command,
-        ]
-
-        try:
-            # Use Popen for streaming
-            process = subprocess.Popen(
-                ssh_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,  # Line buffered
-            )
-
-            stdout_lines = []
-            stderr_lines = []
-            start_time = time.time()
-
-            # Read output as it arrives
-            while True:
-                # Check timeout
-                if timeout and (time.time() - start_time) > timeout:
-                    process.kill()
-                    logger.error(f"SSH command timed out after {timeout}s")
-                    return -1, "".join(stdout_lines), "Timeout"
-
-                # Use select to check which pipes have data
-                # Note: select() doesn't work on Windows, but kbisect is Linux-focused
-                readable, _, _ = select.select([process.stdout, process.stderr], [], [], 0.1)
-
-                for stream in readable:
-                    line = stream.readline()
-                    if line:
-                        if stream == process.stdout:
-                            stdout_lines.append(line)
-                            if chunk_callback:
-                                chunk_callback(line, "")
-                        else:
-                            stderr_lines.append(line)
-                            if chunk_callback:
-                                chunk_callback("", line)
-
-                # Check if process has ended
-                if process.poll() is not None:
-                    # Read any remaining output
-                    remaining_stdout = process.stdout.read()
-                    remaining_stderr = process.stderr.read()
-                    if remaining_stdout:
-                        stdout_lines.append(remaining_stdout)
-                        if chunk_callback:
-                            chunk_callback(remaining_stdout, "")
-                    if remaining_stderr:
-                        stderr_lines.append(remaining_stderr)
-                        if chunk_callback:
-                            chunk_callback("", remaining_stderr)
-                    break
-
-            return process.returncode, "".join(stdout_lines), "".join(stderr_lines)
-
-        except Exception as exc:
-            logger.error(f"SSH streaming command failed: {exc}")
-            return -1, "", str(exc)
-
-    def copy_file(self, local_path: str, remote_path: str) -> bool:
-        """Copy file to slave.
-
-        Args:
-            local_path: Local file path
-            remote_path: Remote destination path
-
-        Returns:
-            True if copy succeeded, False otherwise
-        """
-        scp_command = [
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            local_path,
-            f"{self.user}@{self.host}:{remote_path}",
-        ]
-
-        try:
-            result = subprocess.run(scp_command, capture_output=True, text=True, check=False)
-            return result.returncode == 0
-        except Exception as exc:
-            logger.error(f"SCP failed: {exc}")
-            return False
-
-
 class BisectMaster:
     """Main bisection controller.
 
@@ -384,7 +179,7 @@ class BisectMaster:
         self.iteration_count = 0
 
         # Initialize state manager and create/load session
-        from kbisect.master.state_manager import StateManager
+        from kbisect.persistence import StateManager
 
         self.state = StateManager(db_path=config.db_path)
 
@@ -395,7 +190,7 @@ class BisectMaster:
         # Initialize IPMI controller if configured
         self.ipmi_controller: Optional["IPMIController"] = None  # noqa: UP037
         if config.ipmi_host and config.ipmi_user and config.ipmi_password:
-            from kbisect.master.ipmi_controller import IPMIController
+            from kbisect.power import IPMIController
 
             self.ipmi_controller = IPMIController(config.ipmi_host, config.ipmi_user, config.ipmi_password)
 
@@ -452,17 +247,22 @@ class BisectMaster:
     def capture_kernel_config(self, kernel_version: str, iteration_id: int) -> bool:
         """Capture and store kernel config file from slave in database.
 
+        Reads the .config file from the kernel build directory (KERNEL_PATH/.config)
+        instead of /boot, ensuring the file exists at collection time.
+
         Args:
-            kernel_version: Kernel version string
+            kernel_version: Kernel version string (for logging purposes)
             iteration_id: Iteration ID for linking config file
 
         Returns:
             True if config captured successfully, False otherwise
         """
-        config_path = f"/boot/config-{kernel_version}"
+        # Read .config from kernel build directory
+        # Use ${KERNEL_PATH} environment variable, which defaults to /root/kernel
+        config_path = "${KERNEL_PATH:=/root/kernel}/.config"
 
         # Download config file content from slave (to memory, not disk)
-        ret, stdout, stderr = self.ssh.run_command(f"cat {shlex.quote(config_path)}", timeout=30)
+        ret, stdout, stderr = self.ssh.run_command(f"cat {config_path}", timeout=30)
 
         if ret != 0:
             logger.warning(f"Failed to read kernel config from slave: {stderr}")
@@ -482,7 +282,7 @@ class BisectMaster:
                 # Store content as bytes in database (compressed)
                 config_content = stdout.encode("utf-8")
                 file_id = self.state.store_metadata_file_content(metadata_id, "kernel_config", config_content, compress=True)
-                logger.info(f"✓ Captured kernel config in DB (file_id: {file_id}): {config_path}")
+                logger.info(f"✓ Captured kernel config from build directory in DB (file_id: {file_id})")
                 return True
 
         logger.warning("Could not find metadata record to link kernel config")
@@ -498,7 +298,7 @@ class BisectMaster:
             logger.info("Console log collection skipped (not configured)")
             return None
 
-        from kbisect.master.console_collector import create_console_collector
+        from kbisect.collectors import create_console_collector
 
         # Determine hostname for console connection
         console_hostname = self.config.console_hostname or self.config.slave_host
@@ -523,7 +323,7 @@ class BisectMaster:
             # Primary collector failed, try fallback
             if self.config.console_fallback_ipmi and self.ipmi_controller:
                 logger.warning("⚠ Falling back to IPMI SOL for console logs")
-                from kbisect.master.console_collector import IPMISOLCollector
+                from kbisect.collectors import IPMISOLCollector
 
                 fallback_collector = IPMISOLCollector(console_hostname, self.ipmi_controller)
                 if fallback_collector.start():
@@ -1222,7 +1022,7 @@ class BisectMaster:
         for attempt in range(1, max_attempts + 1):
             try:
                 logger.warning(f"IPMI recovery attempt {attempt}/{max_attempts}...")
-                from kbisect.master.ipmi_controller import IPMIController
+                from kbisect.power import IPMIController
 
                 ipmi = IPMIController(self.config.ipmi_host, self.config.ipmi_user, self.config.ipmi_password)
 
@@ -1565,6 +1365,11 @@ class BisectMaster:
             if not expected_kernel_ver:
                 logger.warning("Could not determine kernel version from build output")
 
+            # Capture kernel config immediately after build (before reboot/cleanup)
+            # Config file is guaranteed to exist in kernel build directory at this point
+            if self.config.collect_kernel_config and expected_kernel_ver:
+                self.capture_kernel_config(expected_kernel_ver, iteration_id)
+
             # Reboot slave
             iteration.state = BisectState.REBOOTING
             self.save_state()
@@ -1622,10 +1427,6 @@ class BisectMaster:
                 logger.info("✓ Correct kernel booted successfully")
             else:
                 logger.warning("Could not verify booted kernel version")
-
-            # Capture kernel config now that it exists in /boot
-            if self.config.collect_kernel_config and expected_kernel_ver:
-                self.capture_kernel_config(expected_kernel_ver, iteration_id)
 
             # Collect iteration metadata if enabled
             if self.config.collect_per_iteration:

@@ -9,8 +9,13 @@ import os
 import subprocess
 import tempfile
 import time
-from enum import Enum
 from typing import List, Optional, Tuple
+
+from kbisect.power.base import (
+    BootDevice,
+    PowerController,
+    PowerState,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -19,24 +24,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_IPMI_TIMEOUT = 30
 POWER_CYCLE_WAIT_TIME = 10
 SOL_DEACTIVATE_TIMEOUT = 5
-
-
-class PowerState(Enum):
-    """Power states for remote systems."""
-
-    ON = "on"
-    OFF = "off"
-    UNKNOWN = "unknown"
-
-
-class BootDevice(Enum):
-    """Boot devices for system configuration."""
-
-    NONE = "none"
-    PXE = "pxe"
-    DISK = "disk"
-    CDROM = "cdrom"
-    BIOS = "bios"
 
 
 class IPMIError(Exception):
@@ -51,29 +38,29 @@ class IPMICommandError(IPMIError):
     """Exception raised when IPMI command fails."""
 
 
-class IPMIController:
+class IPMIController(PowerController):
     """IPMI controller for remote power management.
 
     Provides methods to control power state, boot devices, and access
     serial console via IPMI (Intelligent Platform Management Interface).
 
     Attributes:
-        ipmi_host: Hostname or IP address of IPMI interface
-        ipmi_user: IPMI username for authentication
-        ipmi_password: IPMI password for authentication
+        host: Hostname or IP address of IPMI interface
+        user: IPMI username for authentication
+        password: IPMI password for authentication
     """
 
-    def __init__(self, ipmi_host: str, ipmi_user: str, ipmi_password: str) -> None:
+    def __init__(self, host: str, user: str, password: str) -> None:
         """Initialize IPMI controller.
 
         Args:
-            ipmi_host: IPMI interface hostname or IP address
-            ipmi_user: IPMI username
-            ipmi_password: IPMI password
+            host: IPMI interface hostname or IP address
+            user: IPMI username
+            password: IPMI password
         """
-        self.ipmi_host = ipmi_host
-        self.ipmi_user = ipmi_user
-        self.ipmi_password = ipmi_password
+        self.host = host
+        self.user = user
+        self.password = password
 
     def _run_ipmi_command(
         self, args: List[str], timeout: int = DEFAULT_IPMI_TIMEOUT
@@ -97,7 +84,7 @@ class IPMIController:
             # Create secure temporary file for password
             fd, password_file = tempfile.mkstemp(prefix="ipmi_", suffix=".tmp", text=True)
             try:
-                os.write(fd, self.ipmi_password.encode("utf-8"))
+                os.write(fd, self.password.encode("utf-8"))
             finally:
                 os.close(fd)
 
@@ -109,9 +96,9 @@ class IPMIController:
                 "-I",
                 "lanplus",
                 "-H",
-                self.ipmi_host,
+                self.host,
                 "-U",
-                self.ipmi_user,
+                self.user,
                 "-f",
                 password_file,
             ] + args

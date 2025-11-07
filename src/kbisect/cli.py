@@ -14,11 +14,11 @@ from typing import Any, Dict
 
 import yaml
 
-from kbisect.master.bisect_master import BisectConfig, BisectMaster
-from kbisect.master.ipmi_controller import IPMIController
-from kbisect.master.slave_deployer import SlaveDeployer
-from kbisect.master.slave_monitor import SlaveMonitor
-from kbisect.master.state_manager import StateManager
+from kbisect.core import BisectMaster, SlaveMonitor
+from kbisect.core.orchestrator import BisectConfig
+from kbisect.deployment import SlaveDeployer
+from kbisect.persistence import StateManager
+from kbisect.power import IPMIController
 
 
 # Constants

@@ -7,8 +7,9 @@ except ImportError:
 
 __author__ = "Jan Jurca"
 
-from kbisect.master.bisect_master import BisectConfig, BisectMaster
-from kbisect.master.state_manager import StateManager
+from kbisect.core import BisectMaster
+from kbisect.core.orchestrator import BisectConfig
+from kbisect.persistence import StateManager
 
 
 __all__ = [

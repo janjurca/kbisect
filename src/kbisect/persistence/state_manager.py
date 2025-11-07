@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import scoped_session, sessionmaker
 
-from kbisect.master.models import (
+from kbisect.persistence.models import (
     Base,
     BuildLog,
     Iteration,

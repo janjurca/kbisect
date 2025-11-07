@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from kbisect.remote import SSHClient
+
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class SlaveDeployer:
         slave_user: SSH username for slave access
         deploy_path: Target path on slave for library deployment
         local_lib_path: Path to local library files
+        ssh_client: SSH client for remote operations
     """
 
     def __init__(
@@ -63,12 +66,13 @@ class SlaveDeployer:
         self.slave_host = slave_host
         self.slave_user = slave_user
         self.deploy_path = deploy_path
+        self.ssh_client = SSHClient(slave_host, slave_user)
 
         # Determine local library path
         if local_lib_path:
             self.local_lib_path = Path(local_lib_path)
         else:
-            # Assume we're in master/ directory or kbisect/ root
+            # Assume we're in deployment/ directory or kbisect/ root
             script_dir = Path(__file__).parent.parent
             self.local_lib_path = script_dir / "lib"
 
@@ -87,32 +91,15 @@ class SlaveDeployer:
         Raises:
             SSHError: If SSH command fails to execute
         """
-        ssh_cmd = [
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "ConnectTimeout=10",
-            f"{self.slave_user}@{self.slave_host}",
-            command,
-        ]
-
         try:
-            result = subprocess.run(
-                ssh_cmd, capture_output=True, text=True, timeout=timeout, check=False
-            )
-            return result.returncode, result.stdout, result.stderr
-        except subprocess.TimeoutExpired as exc:
-            msg = f"SSH command timed out: {command}"
-            logger.error(msg)
-            raise SSHError(msg) from exc
+            return self.ssh_client.run_command(command, timeout=timeout)
         except Exception as exc:
             msg = f"SSH command failed: {exc}"
             logger.error(msg)
             raise SSHError(msg) from exc
 
     def _copy_to_slave(self, local_path: str, remote_path: str) -> bool:
-        """Copy files to slave using scp.
+        """Copy files to slave using rsync.
 
         Args:
             local_path: Local file or directory path
