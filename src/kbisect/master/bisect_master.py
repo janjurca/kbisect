@@ -1461,12 +1461,24 @@ class BisectMaster:
             iteration.error = "Boot timeout - cannot test functionality, skipping commit" if is_timeout else "Boot failure - cannot test functionality (wrong kernel booted)"
             result_str = "skip"
 
+        # Calculate duration for this iteration
+        iteration.end_time = datetime.utcnow().isoformat()
+        if iteration.start_time:
+            start = datetime.fromisoformat(iteration.start_time)
+            end = datetime.fromisoformat(iteration.end_time)
+            iteration.duration = int((end - start).total_seconds())
+
         # CRITICAL: Only mark commit if SSH is working
         if not self.ssh.is_alive():
             logger.critical("  ✗ Cannot mark commit - slave is unreachable")
             logger.critical("  Bisection will halt - manual recovery required")
             # Store iteration with error, but don't mark in git bisect yet
-            self.state.update_iteration(iteration_id, error_message=iteration.error + " (git mark pending - slave down)")
+            self.state.update_iteration(
+                iteration_id,
+                error_message=iteration.error + " (git mark pending - slave down)",
+                end_time=iteration.end_time,
+                duration=iteration.duration
+            )
             self.state.update_session(self.session_id, status="halted")
             return None
 
@@ -1479,7 +1491,13 @@ class BisectMaster:
             logger.warning("  Marking as SKIP (custom test mode - cannot test if kernel doesn't boot)")
             success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
 
-        self.state.update_iteration(iteration_id, final_result=result_str, error_message=iteration.error)
+        self.state.update_iteration(
+            iteration_id,
+            final_result=result_str,
+            error_message=iteration.error,
+            end_time=iteration.end_time,
+            duration=iteration.duration
+        )
         return bisection_complete
 
     def run_iteration(self, commit_sha: str) -> Tuple[BisectIteration, bool]:
@@ -1525,8 +1543,22 @@ class BisectMaster:
                 iteration.result = TestResult.SKIP
                 iteration.error = "Build failed"
                 logger.error("Build failed, skipping commit")
+
+                # Calculate duration before early return
+                iteration.end_time = datetime.utcnow().isoformat()
+                if iteration.start_time:
+                    start = datetime.fromisoformat(iteration.start_time)
+                    end = datetime.fromisoformat(iteration.end_time)
+                    iteration.duration = int((end - start).total_seconds())
+
                 _, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
-                self.state.update_iteration(iteration_id, final_result="skip", error_message="Build failed")
+                self.state.update_iteration(
+                    iteration_id,
+                    final_result="skip",
+                    error_message="Build failed",
+                    end_time=iteration.end_time,
+                    duration=iteration.duration
+                )
                 return (iteration, bisection_complete)
 
             # Kernel version was extracted from build output
@@ -1630,10 +1662,36 @@ class BisectMaster:
                 end = datetime.fromisoformat(iteration.end_time)
                 iteration.duration = int((end - start).total_seconds())
 
+                # Persist duration to database
+                self.state.update_iteration(
+                    iteration_id,
+                    end_time=iteration.end_time,
+                    duration=iteration.duration
+                )
+
             self.iterations.append(iteration)
             self.save_state()
 
         return (iteration, bisection_complete)
+
+    def _extract_first_bad_commit(self) -> Optional[str]:
+        """Extract first bad commit SHA from git bisect.
+
+        Returns:
+            Commit SHA if found, None otherwise
+        """
+        ret, stdout, _ = self.ssh.run_command(
+            f"cd {shlex.quote(self.config.slave_kernel_path)} && "
+            "git bisect log | grep 'first bad commit' -A 1 | grep '^commit' | head -1 | awk '{print $2}'"
+        )
+
+        if ret == 0 and stdout.strip():
+            commit_sha = stdout.strip()
+            logger.debug(f"Extracted first bad commit: {commit_sha}")
+            return commit_sha
+
+        logger.warning("Could not extract first bad commit from git bisect log")
+        return None
 
     def run(self) -> bool:
         """Run complete bisection.
@@ -1675,8 +1733,30 @@ class BisectMaster:
             # Check if bisection completed
             if bisection_complete:
                 logger.info("\n=== Bisection Found First Bad Commit! ===")
+
+                # Extract first bad commit SHA
+                first_bad = self._extract_first_bad_commit()
+                if first_bad:
+                    logger.info(f"First bad commit: {first_bad}")
+
+                # Update session as completed
+                self.state.update_session(
+                    self.session_id,
+                    result_commit=first_bad,
+                    status="completed",
+                    end_time=datetime.utcnow().isoformat()
+                )
+
                 self.generate_report()
                 return True
+
+        # Bisection completed (no more commits to test)
+        # Update session status if not already done
+        self.state.update_session(
+            self.session_id,
+            status="completed",
+            end_time=datetime.utcnow().isoformat()
+        )
 
         self.generate_report()
         return True

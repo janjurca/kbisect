@@ -578,7 +578,10 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
         for log in logs:
             size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
-            exit_status = "SUCCESS" if log["exit_code"] == 0 else "FAILED"
+            exit_status = (
+                "RUNNING" if log["exit_code"] is None
+                else ("SUCCESS" if log["exit_code"] == 0 else "FAILED")
+            )
             print(f"  Log ID {log['log_id']}: {log['log_type']} - {exit_status} ({size_kb:.1f} KB)")
 
         print("\nView log: kbisect logs show <log-id>")

@@ -878,7 +878,10 @@ class StateManager:
                     "timestamp": build_log.timestamp,
                     "size_bytes": build_log.size_bytes,
                     "exit_code": build_log.exit_code,
-                    "status": "SUCCESS" if build_log.exit_code == 0 else "FAILED",
+                    "status": (
+                        "RUNNING" if build_log.exit_code is None
+                        else ("SUCCESS" if build_log.exit_code == 0 else "FAILED")
+                    ),
                 })
 
             return logs
