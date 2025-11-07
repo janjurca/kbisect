@@ -57,7 +57,7 @@ class RemoteClient(ABC):
         Returns:
             True if host is reachable, False otherwise
         """
-        ret, _, _ = self.run_command("echo alive", timeout=5)
+        ret, _, _ = self.run_command("echo alive", timeout=15)
         return ret == 0
 
     @abstractmethod
