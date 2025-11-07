@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Automated Kernel Bisection Tool - Find kernel regressions automatically"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = "GPL-3.0-or-later"
 authors = [
     {name = "Jan Jurca"},
 ]
@@ -16,7 +16,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GPL-3.0-or-later",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
@@ -46,24 +46,23 @@ dev = [
 kbisect = "kbisect.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/kbisect"
-Documentation = "https://github.com/yourusername/kbisect/blob/main/README.md"
-Repository = "https://github.com/yourusername/kbisect"
-Issues = "https://github.com/yourusername/kbisect/issues"
+Documentation = "https://github.com/janjurca/kbisect/blob/main/README.md"
+Repository = "https://github.com/janjurca/kbisect"
+Issues = "https://github.com/janjurca/kbisect/issues"
 
 [tool.hatch.version]
 source = "vcs"
 
 [tool.hatch.build.hooks.vcs]
-version-file = "src/kbisect/_version.py"
+version-file = "kbisect/_version.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kbisect"]
+packages = ["kbisect"]
 
 [tool.ruff]
 target-version = "py38"
 line-length = 100
-src = ["src"]
+src = ["kbisect"]
 
 [tool.ruff.lint]
 select = [
