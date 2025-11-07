@@ -740,61 +740,25 @@ def cmd_metadata(args: argparse.Namespace) -> int:
         import json
         print(json.dumps(metadata["metadata"], indent=2))
 
-        # Show associated files
-        files = state.get_metadata_files(args.metadata_id)
-        if files:
-            print("\n" + "=" * 80)
-            print("Associated Files:")
-            print("=" * 80 + "\n")
-            for f in files:
-                storage = "Database" if f.get("file_path") is None else f["file_path"]
-                size_kb = f["file_size"] / 1024 if f.get("file_size") else 0
-                print(f"  File ID: {f['file_id']}")
-                print(f"  Type:    {f['file_type']}")
-                print(f"  Size:    {size_kb:.1f} KB")
-                print(f"  Storage: {storage}")
-                print(f"  Hash:    {f['file_hash'][:16]}..." if f.get('file_hash') else "")
-                print()
-
-    elif args.metadata_command == "files":
-        # List files for specific metadata
-        files = state.get_metadata_files(args.metadata_id)
-
-        if not files:
-            print(f"No files found for metadata {args.metadata_id}")
-            return 0
-
-        print(f"=== Files for Metadata {args.metadata_id} ===\n")
-        print(f"{'File ID':<8} {'Type':<15} {'Size':<12} {'Compressed':<12} {'Storage':<20}")
-        print("-" * 80)
-
-        for f in files:
-            size_kb = f["file_size"] / 1024 if f.get("file_size") else 0
-            compressed = "Yes" if f.get("compressed") else "No"
-            storage = "Database" if f.get("file_path") is None else "Filesystem"
-            print(
-                f"{f['file_id']:<8} {f['file_type']:<15} "
-                f"{size_kb:>7.1f} KB   {compressed:<12} {storage:<20}"
-            )
-
-        print("\nExport file: kbisect metadata export-file <file-id>")
-
     elif args.metadata_command == "export-file":
         # Export file content to disk
-        content = state.get_metadata_file_content(args.file_id)
+        metadata_id = args.file_id
 
-        if content is None:
-            print(f"File {args.file_id} not found or has no content")
+        # Get file content from metadata JSON
+        content_text = state.get_file_content(metadata_id)
+
+        if content_text is None:
+            print(f"File with metadata_id={metadata_id} not found or has no content")
             return 1
 
-        output_path = Path(args.output) if args.output else Path(f"metadata-file-{args.file_id}")
+        output_path = Path(args.output) if args.output else Path(f"metadata-file-{metadata_id}")
 
         try:
-            with output_path.open("wb") as f:
-                f.write(content)
-            print(f"File {args.file_id} exported to: {output_path}")
-            size_kb = len(content) / 1024
-            print(f"Size: {size_kb:.1f} KB (decompressed)")
+            with output_path.open("w", encoding="utf-8") as f:
+                f.write(content_text)
+            print(f"File exported to: {output_path}")
+            size_kb = len(content_text.encode("utf-8")) / 1024
+            print(f"Size: {size_kb:.1f} KB")
         except Exception as exc:
             print(f"Failed to export file: {exc}")
             return 1
@@ -1055,12 +1019,6 @@ def create_parser() -> argparse.ArgumentParser:
         "show", help="Show specific metadata details"
     )
     parser_metadata_show.add_argument("metadata_id", type=int, help="Metadata ID to display")
-
-    # metadata files
-    parser_metadata_files = metadata_subparsers.add_parser(
-        "files", help="List files for specific metadata"
-    )
-    parser_metadata_files.add_argument("metadata_id", type=int, help="Metadata ID")
 
     # metadata export-file
     parser_metadata_export_file = metadata_subparsers.add_parser(

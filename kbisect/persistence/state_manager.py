@@ -23,7 +23,6 @@ from kbisect.persistence.models import (
     Iteration,
     Log,
     Metadata,
-    MetadataFile,
     Session as SessionModel,
 )
 
@@ -1083,177 +1082,102 @@ class StateManager:
         metadata_list = self.get_session_metadata(session_id, "baseline")
         return metadata_list[0] if metadata_list else None
 
-    def store_metadata_file(
-        self, metadata_id: int, file_type: str, file_path: str, compressed: bool = False
+    def store_file_metadata(
+        self,
+        session_id: int,
+        iteration_id: Optional[int],
+        file_type: str,
+        file_content: str,
+        **extra_metadata: Any,
     ) -> int:
-        """Store reference to a metadata file.
+        """Store file as a metadata record with collection_type='file'.
 
         Args:
-            metadata_id: Metadata ID
-            file_type: Type of file
-            file_path: Path to file
-            compressed: Whether file is compressed
+            session_id: Session ID
+            iteration_id: Iteration ID (None for session-level files)
+            file_type: Type of file (e.g., 'kernel_config')
+            file_content: File content as text
+            **extra_metadata: Additional metadata to include in JSON
 
         Returns:
-            File ID
+            Metadata ID of the created file record
 
         Raises:
             DatabaseError: If file storage fails
         """
-        session = self.Session()
+        db_session = self.Session()
         try:
-            # Calculate file hash and size
-            file_hash = None
-            file_size = 0
-
-            path = Path(file_path)
-            if path.exists():
-                with path.open("rb") as f:
-                    content = f.read()
-                    file_hash = hashlib.sha256(content).hexdigest()
-                    file_size = len(content)
-
-            new_file = MetadataFile(
-                metadata_id=metadata_id,
-                file_type=file_type,
-                file_path=file_path,
-                file_hash=file_hash,
-                file_size=file_size,
-                compressed=compressed,
-            )
-
-            session.add(new_file)
-            session.commit()
-            file_id = new_file.file_id
-
-            return file_id
-
-        except Exception as exc:
-            session.rollback()
-            msg = f"Failed to store metadata file: {exc}"
-            logger.error(msg)
-            raise DatabaseError(msg) from exc
-        finally:
-            session.close()
-
-    def store_metadata_file_content(
-        self, metadata_id: int, file_type: str, content: bytes, compress: bool = True
-    ) -> int:
-        """Store metadata file content directly in database.
-
-        Args:
-            metadata_id: Metadata ID
-            file_type: Type of file
-            content: File content as bytes
-            compress: Whether to compress content (default: True)
-
-        Returns:
-            File ID
-
-        Raises:
-            DatabaseError: If file storage fails
-        """
-        session = self.Session()
-        try:
-            # Optionally compress content
-            file_content = content
-            if compress:
-                file_content = gzip.compress(content)
-
             # Calculate hash and size
-            file_hash = hashlib.sha256(content).hexdigest()
-            file_size = len(content)
+            file_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
+            file_size = len(file_content)
 
-            new_file = MetadataFile(
-                metadata_id=metadata_id,
-                file_type=file_type,
-                file_path=None,  # No file path for DB-only storage
-                file_content=file_content,
-                file_hash=file_hash,
-                file_size=file_size,
-                compressed=compress,
+            # Build metadata JSON
+            metadata_json = {
+                "file_type": file_type,
+                "file_content": file_content,
+                "file_hash": file_hash,
+                "file_size": file_size,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **extra_metadata,
+            }
+
+            # Create metadata record
+            new_metadata = Metadata(
+                session_id=session_id,
+                iteration_id=iteration_id,
+                collection_time=datetime.now(timezone.utc).isoformat(),
+                collection_type="file",
+                metadata_json=json.dumps(metadata_json),
+                metadata_hash=file_hash,  # Use file hash for deduplication
             )
 
-            session.add(new_file)
-            session.commit()
-            file_id = new_file.file_id
+            db_session.add(new_metadata)
+            db_session.commit()
+            metadata_id = new_metadata.metadata_id
 
             logger.debug(
-                f"Stored {file_type} file in DB (file_id: {file_id}, "
-                f"size: {file_size} bytes, compressed: {compress})"
+                f"Stored {file_type} file as metadata (metadata_id: {metadata_id}, "
+                f"size: {file_size} bytes)"
             )
-            return file_id
+            return metadata_id
 
         except Exception as exc:
-            session.rollback()
-            msg = f"Failed to store metadata file content: {exc}"
+            db_session.rollback()
+            msg = f"Failed to store file metadata: {exc}"
             logger.error(msg)
             raise DatabaseError(msg) from exc
         finally:
-            session.close()
+            db_session.close()
 
-    def get_metadata_file_content(self, file_id: int) -> Optional[bytes]:
-        """Get metadata file content from database.
+    def get_file_content(self, metadata_id: int) -> Optional[str]:
+        """Get file content from a metadata record.
 
         Args:
-            file_id: File ID
+            metadata_id: Metadata ID of the file record
 
         Returns:
-            File content as bytes, or None if not found
+            File content as text, or None if not found
 
         Raises:
             DatabaseError: If file retrieval fails
         """
-        session = self.Session()
+        db_session = self.Session()
         try:
-            stmt = select(MetadataFile).where(MetadataFile.file_id == file_id)
-            file_record = session.execute(stmt).scalar_one_or_none()
+            stmt = select(Metadata).where(Metadata.metadata_id == metadata_id)
+            metadata = db_session.execute(stmt).scalar_one_or_none()
 
-            if not file_record or not file_record.file_content:
+            if not metadata or metadata.collection_type != "file":
                 return None
 
-            # Decompress if needed
-            content = file_record.file_content
-            if file_record.compressed:
-                content = gzip.decompress(content)
-
-            return content
+            metadata_dict = json.loads(metadata.metadata_json)
+            return metadata_dict.get("file_content")
 
         except Exception as exc:
-            msg = f"Failed to get metadata file content: {exc}"
+            msg = f"Failed to get file content: {exc}"
             logger.error(msg)
             raise DatabaseError(msg) from exc
         finally:
-            session.close()
-
-    def get_metadata_files(self, metadata_id: int) -> List[Dict[str, Any]]:
-        """Get all files associated with metadata.
-
-        Args:
-            metadata_id: Metadata ID
-
-        Returns:
-            List of file dictionaries
-        """
-        session = self.Session()
-        try:
-            stmt = select(MetadataFile).where(MetadataFile.metadata_id == metadata_id)
-            results = session.execute(stmt).scalars().all()
-
-            return [
-                {
-                    "file_id": file.file_id,
-                    "metadata_id": file.metadata_id,
-                    "file_type": file.file_type,
-                    "file_path": file.file_path,
-                    "file_hash": file.file_hash,
-                    "file_size": file.file_size,
-                    "compressed": file.compressed,
-                }
-                for file in results
-            ]
-        finally:
-            session.close()
+            db_session.close()
 
     def generate_summary(self, session_id: int) -> Dict[str, Any]:
         """Generate summary of bisection session.

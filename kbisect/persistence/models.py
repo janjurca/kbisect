@@ -167,40 +167,9 @@ class Metadata(Base):
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="metadata_records")
-    files: Mapped[List["MetadataFile"]] = relationship(
-        "MetadataFile", back_populates="metadata_record", cascade="all, delete-orphan"
-    )
 
     def __repr__(self) -> str:
         return (
             f"<Metadata(id={self.metadata_id}, type={self.collection_type}, "
             f"session={self.session_id})>"
-        )
-
-
-class MetadataFile(Base):
-    """Metadata file model with optional embedded content.
-
-    Stores file content directly in database as BLOB or references external files.
-    """
-
-    __tablename__ = "metadata_files"
-
-    file_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    metadata_id: Mapped[int] = mapped_column(Integer, ForeignKey("metadata.metadata_id"), nullable=False)
-    file_type: Mapped[str] = mapped_column(String, nullable=False)
-    file_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # Optional for DB-only storage
-    file_content: Mapped[Optional[bytes]] = mapped_column(BLOB, nullable=True)  # File content as BLOB
-    file_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-
-    # Relationships
-    metadata_record: Mapped["Metadata"] = relationship("Metadata", back_populates="files")
-
-    def __repr__(self) -> str:
-        storage = "DB" if self.file_content is not None else f"path={self.file_path}"
-        return (
-            f"<MetadataFile(id={self.file_id}, type={self.file_type}, "
-            f"{storage})>"
         )

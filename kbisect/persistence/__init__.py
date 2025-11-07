@@ -6,7 +6,6 @@ from kbisect.persistence.models import (
     Log,
     BuildLog,
     Metadata,
-    MetadataFile,
 )
 from kbisect.persistence.state_manager import StateManager
 
@@ -17,7 +16,6 @@ __all__ = [
     "Log",
     "BuildLog",
     "Metadata",
-    "MetadataFile",
     # State Manager
     "StateManager",
 ]

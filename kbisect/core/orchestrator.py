@@ -317,33 +317,18 @@ class BisectMaster:
             logger.warning(f"Kernel config file is empty: {config_path}")
             return False
 
-        # Store config content directly in database
-        metadata_list = self.state.get_session_metadata(self.session_id, "iteration")
-        if not metadata_list:
-            logger.error(
-                f"Could not find any metadata records for session {self.session_id}. "
-                "This should not happen - metadata record should be created before kernel config capture."
-            )
-            return False
-
-        # Find metadata for this iteration
-        iteration_metadata = [m for m in metadata_list if m.get("iteration_id") == iteration_id]
-        if not iteration_metadata:
-            logger.error(
-                f"Could not find metadata record for iteration {iteration_id}. "
-                f"Found {len(metadata_list)} metadata records but none match this iteration. "
-                "Ensure create_iteration_metadata_record() is called before kernel config capture."
-            )
-            return False
-
-        metadata_id = iteration_metadata[0]["metadata_id"]
+        # Store config content as metadata record with collection_type='file'
         try:
-            # Store content as bytes in database (compressed)
-            config_content = stdout.encode("utf-8")
-            file_id = self.state.store_metadata_file_content(
-                metadata_id, "kernel_config", config_content, compress=True
+            # Store content as text in metadata JSON
+            config_content = stdout  # Already decoded as text
+            metadata_id = self.state.store_file_metadata(
+                session_id=self.session_id,
+                iteration_id=iteration_id,
+                file_type="kernel_config",
+                file_content=config_content,
+                kernel_version=kernel_version,
             )
-            logger.info(f"✓ Captured kernel config from build directory in DB (file_id: {file_id})")
+            logger.info(f"✓ Captured kernel config from build directory in DB (metadata_id: {metadata_id})")
             return True
         except Exception as exc:
             logger.error(f"Failed to store kernel config in database: {exc}")
