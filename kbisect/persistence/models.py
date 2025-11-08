@@ -150,7 +150,8 @@ class BuildLog(Base):
 class Metadata(Base):
     """Metadata collection model.
 
-    Stores system metadata with JSON content and hash-based deduplication.
+    Stores system metadata as text content. The collection_type field specifies
+    the nature of the metadata (e.g., kernel_config, rpmqa, etc.).
     """
 
     __tablename__ = "metadata"
@@ -162,8 +163,7 @@ class Metadata(Base):
     )
     collection_time: Mapped[str] = mapped_column(String, nullable=False)
     collection_type: Mapped[str] = mapped_column(String, nullable=False)
-    metadata_json: Mapped[str] = mapped_column(Text, nullable=False)
-    metadata_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    data: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="metadata_records")

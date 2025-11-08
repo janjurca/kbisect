@@ -733,12 +733,21 @@ def cmd_metadata(args: argparse.Namespace) -> int:
         print(f"Iteration ID:      {metadata['iteration_id'] or 'N/A'}")
         print(f"Collection Type:   {metadata['collection_type']}")
         print(f"Collection Time:   {metadata['collection_time']}")
-        print(f"Metadata Hash:     {metadata['metadata_hash'][:16]}..." if metadata['metadata_hash'] else "")
         print("\n" + "=" * 80 + "\n")
 
-        # Pretty print metadata JSON
+        # Display metadata content
         import json
-        print(json.dumps(metadata["metadata"], indent=2))
+        metadata_content = metadata["metadata"]
+
+        # If metadata is a dict, pretty print as JSON
+        if isinstance(metadata_content, dict):
+            print(json.dumps(metadata_content, indent=2))
+        # If metadata is a string, print it directly (preserves newlines)
+        elif isinstance(metadata_content, str):
+            print(metadata_content)
+        else:
+            # Fallback for other types
+            print(metadata_content)
 
     elif args.metadata_command == "export-file":
         # Export file content to disk

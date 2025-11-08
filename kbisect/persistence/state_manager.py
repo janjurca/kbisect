@@ -909,18 +909,7 @@ class StateManager:
         session = self.Session()
         try:
             # Convert metadata to JSON
-            metadata_json = json.dumps(metadata_dict, sort_keys=True)
-
-            # Calculate hash for deduplication
-            metadata_hash = hashlib.sha256(metadata_json.encode()).hexdigest()
-
-            # Check if identical metadata already exists
-            stmt = select(Metadata).where(Metadata.metadata_hash == metadata_hash)
-            existing = session.execute(stmt).scalar_one_or_none()
-
-            if existing:
-                logger.debug(f"Metadata already exists with hash {metadata_hash[:8]}")
-                return existing.metadata_id
+            data = json.dumps(metadata_dict, sort_keys=True)
 
             # Insert new metadata
             new_metadata = Metadata(
@@ -930,8 +919,7 @@ class StateManager:
                     "collection_time", datetime.now(timezone.utc).isoformat()
                 ),
                 collection_type=metadata_dict.get("collection_type", "unknown"),
-                metadata_json=metadata_json,
-                metadata_hash=metadata_hash,
+                data=data,
             )
 
             session.add(new_metadata)
@@ -977,11 +965,9 @@ class StateManager:
                 return False
 
             # Update metadata fields
-            metadata_json = json.dumps(metadata_dict, sort_keys=True)
-            metadata_hash = hashlib.sha256(metadata_json.encode()).hexdigest()
+            data = json.dumps(metadata_dict, sort_keys=True)
 
-            existing.metadata_json = metadata_json
-            existing.metadata_hash = metadata_hash
+            existing.data = data
             existing.collection_time = metadata_dict.get(
                 "collection_time", existing.collection_time
             )
@@ -1018,14 +1004,19 @@ class StateManager:
             if not result:
                 return None
 
+            # Try to parse as JSON, otherwise return raw string
+            try:
+                metadata_content = json.loads(result.data)
+            except (json.JSONDecodeError, ValueError):
+                metadata_content = result.data
+
             return {
                 "metadata_id": result.metadata_id,
                 "session_id": result.session_id,
                 "iteration_id": result.iteration_id,
                 "collection_time": result.collection_time,
                 "collection_type": result.collection_type,
-                "metadata": json.loads(result.metadata_json),
-                "metadata_hash": result.metadata_hash,
+                "metadata": metadata_content,
             }
         finally:
             session.close()
@@ -1055,18 +1046,24 @@ class StateManager:
 
             results = session.execute(stmt).scalars().all()
 
-            return [
-                {
+            metadata_list = []
+            for meta in results:
+                # Try to parse as JSON, otherwise use raw string
+                try:
+                    metadata_content = json.loads(meta.data)
+                except (json.JSONDecodeError, ValueError):
+                    metadata_content = meta.data
+
+                metadata_list.append({
                     "metadata_id": meta.metadata_id,
                     "session_id": meta.session_id,
                     "iteration_id": meta.iteration_id,
                     "collection_time": meta.collection_time,
                     "collection_type": meta.collection_type,
-                    "metadata": json.loads(meta.metadata_json),
-                    "metadata_hash": meta.metadata_hash,
-                }
-                for meta in results
-            ]
+                    "metadata": metadata_content,
+                })
+
+            return metadata_list
         finally:
             session.close()
 
@@ -1107,28 +1104,16 @@ class StateManager:
         """
         db_session = self.Session()
         try:
-            # Calculate hash and size
-            file_hash = hashlib.sha256(file_content.encode("utf-8")).hexdigest()
+            # Calculate size for logging
             file_size = len(file_content)
 
-            # Build metadata JSON
-            metadata_json = {
-                "file_type": file_type,
-                "file_content": file_content,
-                "file_hash": file_hash,
-                "file_size": file_size,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                **extra_metadata,
-            }
-
-            # Create metadata record
+            # Create metadata record with file content as data
             new_metadata = Metadata(
                 session_id=session_id,
                 iteration_id=iteration_id,
                 collection_time=datetime.now(timezone.utc).isoformat(),
-                collection_type="file",
-                metadata_json=json.dumps(metadata_json),
-                metadata_hash=file_hash,  # Use file hash for deduplication
+                collection_type=file_type,  # Use file_type as collection_type (e.g., 'kernel_config')
+                data=file_content,  # Store raw file content directly
             )
 
             db_session.add(new_metadata)
@@ -1166,11 +1151,11 @@ class StateManager:
             stmt = select(Metadata).where(Metadata.metadata_id == metadata_id)
             metadata = db_session.execute(stmt).scalar_one_or_none()
 
-            if not metadata or metadata.collection_type != "file":
+            if not metadata:
                 return None
 
-            metadata_dict = json.loads(metadata.metadata_json)
-            return metadata_dict.get("file_content")
+            # Return raw data content directly
+            return metadata.data
 
         except Exception as exc:
             msg = f"Failed to get file content: {exc}"
