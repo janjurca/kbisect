@@ -52,6 +52,9 @@ class Session(Base):
     metadata_records: Mapped[List["Metadata"]] = relationship(
         "Metadata", back_populates="session", cascade="all, delete-orphan"
     )
+    hosts: Mapped[List["Host"]] = relationship(
+        "Host", back_populates="session", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return (
@@ -90,6 +93,9 @@ class Iteration(Base):
     )
     build_logs: Mapped[List["BuildLog"]] = relationship(
         "BuildLog", back_populates="iteration", cascade="all, delete-orphan"
+    )
+    iteration_results: Mapped[List["IterationResult"]] = relationship(
+        "IterationResult", back_populates="iteration", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
@@ -172,4 +178,68 @@ class Metadata(Base):
         return (
             f"<Metadata(id={self.metadata_id}, type={self.collection_type}, "
             f"session={self.session_id})>"
+        )
+
+
+class Host(Base):
+    """Host configuration model for multi-host bisection.
+
+    Represents a single host/machine participating in the bisection.
+    Each host can have its own test script and configuration.
+    """
+
+    __tablename__ = "hosts"
+
+    host_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("sessions.session_id"), nullable=False)
+    hostname: Mapped[str] = mapped_column(String, nullable=False)
+    ssh_user: Mapped[str] = mapped_column(String, nullable=False, default="root")
+    kernel_path: Mapped[str] = mapped_column(String, nullable=False)
+    bisect_path: Mapped[str] = mapped_column(String, nullable=False)
+    test_script: Mapped[str] = mapped_column(String, nullable=False)
+    ipmi_host: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ipmi_user: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ipmi_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Relationships
+    session: Mapped["Session"] = relationship("Session", back_populates="hosts")
+    iteration_results: Mapped[List["IterationResult"]] = relationship(
+        "IterationResult", back_populates="host", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Host(id={self.host_id}, hostname={self.hostname}, "
+            f"test_script={self.test_script})>"
+        )
+
+
+class IterationResult(Base):
+    """Per-host test result for a single iteration.
+
+    In multi-host mode, each iteration can have multiple results - one per host.
+    All hosts must pass for the iteration to be marked as GOOD.
+    """
+
+    __tablename__ = "iteration_results"
+
+    result_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
+    host_id: Mapped[int] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=False)
+    build_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    boot_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    test_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    final_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    timestamp: Mapped[str] = mapped_column(String, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    test_output: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    iteration: Mapped["Iteration"] = relationship("Iteration", back_populates="iteration_results")
+    host: Mapped["Host"] = relationship("Host", back_populates="iteration_results")
+
+    def __repr__(self) -> str:
+        return (
+            f"<IterationResult(id={self.result_id}, iteration={self.iteration_id}, "
+            f"host={self.host_id}, result={self.final_result})>"
         )

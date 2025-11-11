@@ -15,7 +15,7 @@ from typing import Any, Dict
 import yaml
 
 from kbisect.core import BisectMaster, SlaveMonitor
-from kbisect.core.orchestrator import BisectConfig
+from kbisect.core.orchestrator import BisectConfig, HostConfig
 from kbisect.deployment import SlaveDeployer
 from kbisect.persistence import StateManager
 from kbisect.power import IPMIController
@@ -87,6 +87,9 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
 
     Returns:
         BisectConfig object
+
+    Raises:
+        SystemExit: If hosts configuration is missing or invalid
     """
     # Get kernel config settings from config file only
     kernel_config_file = config_dict.get("kernel_config", {}).get("config_file")
@@ -100,22 +103,44 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
     collect_console_logs = console_logs_config.get("enabled", False)
     console_collector_type = console_logs_config.get("collector", "auto")
 
-    # Get slave host from config only
-    slave_host = config_dict["slave"]["hostname"]
+    # Parse hosts configuration (REQUIRED)
+    if "hosts" not in config_dict:
+        logger.error("Config file missing 'hosts' section")
+        logger.error("Multi-host configuration is required. See example config:")
+        logger.error("  kbisect init-config")
+        sys.exit(1)
+
+    if not config_dict["hosts"]:
+        logger.error("Config file 'hosts' section is empty")
+        logger.error("At least one host must be configured")
+        sys.exit(1)
+
+    hosts = []
+    for host_dict in config_dict["hosts"]:
+        if "hostname" not in host_dict:
+            logger.error("Each host must have 'hostname' field")
+            sys.exit(1)
+
+        host_config = HostConfig(
+            hostname=host_dict["hostname"],
+            ssh_user=host_dict.get("ssh_user", "root"),
+            kernel_path=host_dict.get("kernel_path", "/root/kernel"),
+            bisect_path=host_dict.get("bisect_path", "/root/kernel-bisect/lib"),
+            test_script=host_dict.get("test_script", "test.sh"),
+            ipmi_host=host_dict.get("ipmi_host"),
+            ipmi_user=host_dict.get("ipmi_user"),
+            ipmi_password=host_dict.get("ipmi_password"),
+        )
+        hosts.append(host_config)
+
+    logger.info(f"Loaded multi-host configuration with {len(hosts)} hosts")
 
     return BisectConfig(
-        slave_host=slave_host,
-        slave_user=config_dict["slave"].get("ssh_user", "root"),
-        slave_kernel_path=config_dict["slave"].get("kernel_path", "/root/kernel"),
-        slave_bisect_path=config_dict["slave"].get("bisect_path", "/root/kernel-bisect/lib"),
-        ipmi_host=config_dict.get("ipmi", {}).get("host"),
-        ipmi_user=config_dict.get("ipmi", {}).get("username"),
-        ipmi_password=config_dict.get("ipmi", {}).get("password"),
+        hosts=hosts,
         boot_timeout=config_dict.get("timeouts", {}).get("boot", 300),
         test_timeout=config_dict.get("timeouts", {}).get("test", 600),
         build_timeout=config_dict.get("timeouts", {}).get("build", 1800),
         test_type=config_dict.get("test", {}).get("type", "boot"),
-        test_script=config_dict.get("test", {}).get("script"),
         state_dir=config_dict.get("state_dir", "."),
         db_path=config_dict.get("database_path", "bisect.db"),
         kernel_config_file=kernel_config_file,
@@ -146,28 +171,39 @@ def cmd_init(args: argparse.Namespace) -> int:
     # Load config
     config_dict = load_config(args.config)
 
-    # Check and deploy slave if needed
-    slave_host = config_dict["slave"]["hostname"]
-    slave_user = config_dict["slave"].get("ssh_user", "root")
-    deploy_path = config_dict["slave"].get("bisect_path", "/root/kernel-bisect/lib")
+    # Validate hosts configuration
+    if "hosts" not in config_dict or not config_dict["hosts"]:
+        print("✗ Config file must have 'hosts' section")
+        print("Run: kbisect init-config to create example config")
+        return 1
+
     auto_deploy = config_dict.get("deployment", {}).get("auto_deploy", True)
 
-    deployer = SlaveDeployer(slave_host, slave_user, deploy_path)
+    # Check and deploy all hosts if needed
+    print(f"Checking setup for {len(config_dict['hosts'])} host(s)...")
+    for i, host_dict in enumerate(config_dict["hosts"], 1):
+        host_name = host_dict["hostname"]
+        host_user = host_dict.get("ssh_user", "root")
+        deploy_path = host_dict.get("bisect_path", "/root/kernel-bisect/lib")
 
-    # Check if slave is deployed
-    print("Checking slave setup...")
-    if not deployer.is_deployed():
-        if auto_deploy or args.force_deploy:
-            print("Slave not configured. Deploying automatically...\n")
-            if not deployer.deploy_full():
-                print("\n✗ Deployment failed!")
+        print(f"\n[{i}/{len(config_dict['hosts'])}] Checking host: {host_name}")
+        deployer = SlaveDeployer(host_name, host_user, deploy_path)
+
+        if not deployer.is_deployed():
+            if auto_deploy or args.force_deploy:
+                print(f"  Host not configured. Deploying automatically...")
+                if not deployer.deploy_full():
+                    print(f"\n✗ Deployment failed for {host_name}!")
+                    return 1
+                print(f"  ✓ Deployed successfully")
+            else:
+                print(f"\n✗ Host {host_name} is not deployed and auto_deploy is disabled")
+                print("Run: kbisect deploy to deploy manually")
                 return 1
         else:
-            print("\n✗ Slave is not deployed and auto_deploy is disabled")
-            print("Run: kbisect deploy to deploy manually")
-            return 1
-    else:
-        print("✓ Slave is already deployed\n")
+            print(f"  ✓ Already deployed")
+
+    print("\n✓ All hosts are deployed")
 
     # Create bisect config
     config = create_bisect_config(config_dict, args)
@@ -180,7 +216,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("\n✓ Initialization complete")
         print(f"\nGood commit: {args.good_commit}")
         print(f"Bad commit:  {args.bad_commit}")
-        print(f"Slave:       {config.slave_host}")
+        print(f"Hosts:       {len(config.hosts)} configured")
+        for host_config in config.hosts:
+            print(f"  - {host_config.hostname}")
         print("\nReady to start bisection!")
         print("Run: kbisect start")
         return 0
@@ -235,28 +273,43 @@ def cmd_start(args: argparse.Namespace) -> int:
             if last_iteration.error_message:
                 print(f"Error: {last_iteration.error_message}")
 
-        print("\nThe previous session was halted due to slave being unreachable.")
+        print("\nThe previous session was halted due to host being unreachable.")
         print("Before resuming, please ensure:")
-        print("  1. The slave machine is powered on and stable")
-        print("  2. A stable kernel is booted")
-        print("  3. SSH connectivity is working")
+        print("  1. All host machines are powered on and stable")
+        print("  2. Stable kernels are booted on all hosts")
+        print("  3. SSH connectivity is working for all hosts")
 
-        # Verify slave connectivity before resuming
-        print("\nVerifying slave connectivity...")
-        slave_host = config_dict["slave"]["hostname"]
-        slave_user = config_dict["slave"].get("ssh_user", "root")
+        # Verify connectivity to all hosts before resuming
+        print("\nVerifying host connectivity...")
 
-        from kbisect.master.bisect_master import SSHClient
-
-        ssh = SSHClient(slave_host, slave_user)
-        if not ssh.is_alive():
-            print("\n✗ Slave is still unreachable!")
-            print(f"  Host: {slave_host}")
-            print("\nPlease fix the slave machine and try again.")
+        if "hosts" not in config_dict or not config_dict["hosts"]:
+            print("✗ Config file must have 'hosts' section")
             state.close()
             return 1
 
-        print("✓ Slave is reachable\n")
+        from kbisect.remote import SSHClient
+
+        all_reachable = True
+        ssh_clients = []
+        for host_dict in config_dict["hosts"]:
+            host_name = host_dict["hostname"]
+            host_user = host_dict.get("ssh_user", "root")
+            ssh = SSHClient(host_name, host_user)
+            ssh_clients.append((host_name, ssh, host_dict))
+
+            if not ssh.is_alive():
+                print(f"  ✗ {host_name} is unreachable!")
+                all_reachable = False
+            else:
+                print(f"  ✓ {host_name} is reachable")
+
+        if not all_reachable:
+            print("\n✗ One or more hosts are still unreachable!")
+            print("\nPlease fix the host machines and try again.")
+            state.close()
+            return 1
+
+        print("\n✓ All hosts are reachable")
         print("Resuming bisection from halted state...")
 
         # Check if there's a pending commit to mark
@@ -276,9 +329,11 @@ def cmd_start(args: argparse.Namespace) -> int:
                         mark_as = "skip"
                         print("  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)")
 
-                    # Mark the commit via SSH
-                    mark_cmd = f"cd {config_dict['slave'].get('kernel_path', '/root/kernel')} && git bisect {mark_as}"
-                    ret, _, stderr = ssh.run_command(mark_cmd)
+                    # Mark the commit via SSH (use first host since all share git state)
+                    first_host_name, first_ssh, first_host_dict = ssh_clients[0]
+                    kernel_path = first_host_dict.get('kernel_path', '/root/kernel')
+                    mark_cmd = f"cd {kernel_path} && git bisect {mark_as}"
+                    ret, _, stderr = first_ssh.run_command(mark_cmd)
 
                     if ret == 0:
                         print(f"✓ Commit marked as {mark_as}")
@@ -406,7 +461,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
-    """Monitor slave health.
+    """Monitor host health.
 
     Args:
         args: Parsed command-line arguments
@@ -416,38 +471,48 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     """
     config_dict = load_config(args.config)
 
-    monitor = SlaveMonitor(
-        config_dict["slave"]["hostname"], config_dict["slave"].get("ssh_user", "root")
-    )
+    if "hosts" not in config_dict or not config_dict["hosts"]:
+        print("✗ Config file must have 'hosts' section")
+        return 1
 
-    print("=== Slave Monitor ===\n")
+    # Create monitors for all hosts
+    monitors = []
+    for host_dict in config_dict["hosts"]:
+        monitor = SlaveMonitor(
+            host_dict["hostname"], host_dict.get("ssh_user", "root")
+        )
+        monitors.append((host_dict["hostname"], monitor))
+
+    print(f"=== Host Monitor ({len(monitors)} hosts) ===\n")
 
     if args.continuous:
-        print("Monitoring slave (Ctrl+C to stop)...\n")
+        print(f"Monitoring {len(monitors)} host(s) (Ctrl+C to stop)...\n")
         try:
             while True:
-                status = monitor.check_health()
-                print(
-                    f"[{status.last_check}] Alive: {status.is_alive} | "
-                    f"Kernel: {status.kernel_version or 'N/A'}"
-                )
-                import time
-
+                for hostname, monitor in monitors:
+                    status = monitor.check_health()
+                    print(
+                        f"[{status.last_check}] {hostname}: Alive={status.is_alive} | "
+                        f"Kernel={status.kernel_version or 'N/A'}"
+                    )
+                print()  # Blank line between intervals
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             print("\nMonitoring stopped")
     else:
-        status = monitor.check_health()
-        print(f"Slave: {config_dict['slave']['hostname']}")
-        print(f"Alive: {status.is_alive}")
-        print(f"Ping:  {status.ping_responsive}")
-        print(f"SSH:   {status.ssh_responsive}")
-        if status.kernel_version:
-            print(f"Kernel: {status.kernel_version}")
-        if status.uptime:
-            print(f"Uptime: {status.uptime}")
-        if status.error:
-            print(f"Error: {status.error}")
+        for hostname, monitor in monitors:
+            status = monitor.check_health()
+            print(f"Host: {hostname}")
+            print(f"  Alive:  {status.is_alive}")
+            print(f"  Ping:   {status.ping_responsive}")
+            print(f"  SSH:    {status.ssh_responsive}")
+            if status.kernel_version:
+                print(f"  Kernel: {status.kernel_version}")
+            if status.uptime:
+                print(f"  Uptime: {status.uptime}")
+            if status.error:
+                print(f"  Error:  {status.error}")
+            print()
 
     return 0
 
@@ -463,13 +528,34 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
     """
     config_dict = load_config(args.config)
 
-    ipmi_config = config_dict.get("ipmi", {})
-    if not ipmi_config.get("host"):
-        print("Error: IPMI not configured")
+    if "hosts" not in config_dict or not config_dict["hosts"]:
+        print("✗ Config file must have 'hosts' section")
         return 1
 
+    # Collect all hosts with IPMI configured
+    ipmi_hosts = []
+    for i, host_dict in enumerate(config_dict["hosts"]):
+        if host_dict.get("ipmi_host") and host_dict.get("ipmi_user") and host_dict.get("ipmi_password"):
+            ipmi_hosts.append((i, host_dict))
+
+    if not ipmi_hosts:
+        print("✗ No hosts have IPMI configured")
+        print("Configure IPMI for at least one host in config file")
+        return 1
+
+    # If multiple hosts have IPMI, show selection (for now, use first host)
+    # TODO: Add --host-index argument to allow selection
+    if len(ipmi_hosts) > 1:
+        print(f"Note: {len(ipmi_hosts)} hosts have IPMI configured, using first host")
+        print("  (Future: Use --host-index to select specific host)\n")
+
+    host_index, host_dict = ipmi_hosts[0]
+    host_name = host_dict["hostname"]
+
+    print(f"=== IPMI Control for {host_name} ===\n")
+
     controller = IPMIController(
-        ipmi_config["host"], ipmi_config["username"], ipmi_config["password"]
+        host_dict["ipmi_host"], host_dict["ipmi_user"], host_dict["ipmi_password"]
     )
 
     if args.ipmi_command == "status":
@@ -477,16 +563,24 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
         print(f"Power state: {state.value}")
 
     elif args.ipmi_command == "on":
+        print("Powering on...")
         controller.power_on()
+        print("✓ Power on command sent")
 
     elif args.ipmi_command == "off":
+        print("Powering off...")
         controller.power_off()
+        print("✓ Power off command sent")
 
     elif args.ipmi_command == "reset":
+        print("Resetting...")
         controller.reset()
+        print("✓ Reset command sent")
 
     elif args.ipmi_command == "cycle":
+        print("Power cycling...")
         controller.power_cycle()
+        print("✓ Power cycle command sent")
 
     return 0
 
@@ -802,7 +896,7 @@ def cmd_metadata(args: argparse.Namespace) -> int:
 
 
 def cmd_deploy(args: argparse.Namespace) -> int:
-    """Deploy slave components.
+    """Deploy components to all hosts.
 
     Args:
         args: Parsed command-line arguments
@@ -810,47 +904,65 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     Returns:
         Exit code (0 for success, 1 for failure)
     """
-    print("=== Slave Deployment ===\n")
+    print("=== Host Deployment ===\n")
 
     # Load config
     config_dict = load_config(args.config)
 
-    slave_host = config_dict["slave"]["hostname"]
-    slave_user = config_dict["slave"].get("ssh_user", "root")
-    deploy_path = config_dict["slave"].get("bisect_path", "/root/kernel-bisect/lib")
-
-    deployer = SlaveDeployer(slave_host, slave_user, deploy_path)
-
-    if args.verify_only:
-        # Just verify deployment
-        print(f"Verifying deployment on {slave_host}...")
-        if deployer.is_deployed():
-            print("\n✓ Slave is deployed")
-            success, _checks = deployer.verify_deployment()
-            return 0 if success else 1
-
-        print("\n✗ Slave is NOT deployed")
+    if "hosts" not in config_dict or not config_dict["hosts"]:
+        print("✗ Config file must have 'hosts' section")
         return 1
 
-    if args.update_only:
-        # Update library only
-        print(f"Updating library on {slave_host}...")
-        if deployer.update_library():
-            print("\n✓ Library updated successfully")
-            return 0
+    print(f"Deploying to {len(config_dict['hosts'])} host(s)...\n")
 
-        print("\n✗ Library update failed")
-        return 1
+    all_success = True
+    for i, host_dict in enumerate(config_dict["hosts"], 1):
+        host_name = host_dict["hostname"]
+        host_user = host_dict.get("ssh_user", "root")
+        deploy_path = host_dict.get("bisect_path", "/root/kernel-bisect/lib")
 
-    # Full deployment
-    print(f"Deploying to {slave_host}...")
-    if deployer.deploy_full():
-        print("\n✓ Deployment successful!")
-        print(f"\nSlave {slave_host} is now ready for bisection")
+        print(f"[{i}/{len(config_dict['hosts'])}] Host: {host_name}")
+
+        deployer = SlaveDeployer(host_name, host_user, deploy_path)
+
+        if args.verify_only:
+            # Just verify deployment
+            print(f"  Verifying deployment...")
+            if deployer.is_deployed():
+                print("  ✓ Deployed")
+                success, _checks = deployer.verify_deployment()
+                if not success:
+                    all_success = False
+            else:
+                print("  ✗ NOT deployed")
+                all_success = False
+
+        elif args.update_only:
+            # Update library only
+            print(f"  Updating library...")
+            if deployer.update_library():
+                print("  ✓ Library updated")
+            else:
+                print("  ✗ Library update failed")
+                all_success = False
+
+        else:
+            # Full deployment
+            print(f"  Deploying...")
+            if deployer.deploy_full():
+                print("  ✓ Deployment successful")
+            else:
+                print("  ✗ Deployment failed")
+                all_success = False
+
+        print()
+
+    if all_success:
+        print("✓ All hosts deployed successfully!")
         return 0
-
-    print("\n✗ Deployment failed!")
-    return 1
+    else:
+        print("✗ One or more hosts failed deployment")
+        return 1
 
 
 def cmd_init_config(args: argparse.Namespace) -> int:

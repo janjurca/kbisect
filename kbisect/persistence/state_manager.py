@@ -20,7 +20,9 @@ from sqlalchemy.orm import scoped_session, sessionmaker
 from kbisect.persistence.models import (
     Base,
     BuildLog,
+    Host,
     Iteration,
+    IterationResult,
     Log,
     Metadata,
     Session as SessionModel,
@@ -522,6 +524,271 @@ class StateManager:
                 )
 
             return iterations
+        finally:
+            session.close()
+
+    def create_host(
+        self,
+        session_id: int,
+        hostname: str,
+        ssh_user: str,
+        kernel_path: str,
+        bisect_path: str,
+        test_script: str,
+        ipmi_host: Optional[str] = None,
+        ipmi_user: Optional[str] = None,
+        ipmi_password: Optional[str] = None,
+    ) -> int:
+        """Create new host configuration.
+
+        Args:
+            session_id: Parent session ID
+            hostname: Hostname or IP address
+            ssh_user: SSH username
+            kernel_path: Path to kernel directory on host
+            bisect_path: Path to bisect scripts on host
+            test_script: Path to test script for this host
+            ipmi_host: Optional IPMI hostname
+            ipmi_user: Optional IPMI username
+            ipmi_password: Optional IPMI password
+
+        Returns:
+            Host ID
+
+        Raises:
+            DatabaseError: If host creation fails
+        """
+        session = self.Session()
+        try:
+            new_host = Host(
+                session_id=session_id,
+                hostname=hostname,
+                ssh_user=ssh_user,
+                kernel_path=kernel_path,
+                bisect_path=bisect_path,
+                test_script=test_script,
+                ipmi_host=ipmi_host,
+                ipmi_user=ipmi_user,
+                ipmi_password=ipmi_password,
+            )
+
+            session.add(new_host)
+            session.commit()
+            host_id = new_host.host_id
+
+            logger.info(f"Created host {host_id}: {hostname}")
+            return host_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create host: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def get_hosts(self, session_id: int) -> List[Dict[str, Any]]:
+        """Get all hosts for a session.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            List of host dictionaries
+        """
+        session = self.Session()
+        try:
+            stmt = select(Host).where(Host.session_id == session_id).order_by(Host.host_id)
+            results = session.execute(stmt).scalars().all()
+
+            return [
+                {
+                    "host_id": host.host_id,
+                    "session_id": host.session_id,
+                    "hostname": host.hostname,
+                    "ssh_user": host.ssh_user,
+                    "kernel_path": host.kernel_path,
+                    "bisect_path": host.bisect_path,
+                    "test_script": host.test_script,
+                    "ipmi_host": host.ipmi_host,
+                    "ipmi_user": host.ipmi_user,
+                    "ipmi_password": host.ipmi_password,
+                }
+                for host in results
+            ]
+        finally:
+            session.close()
+
+    def get_host(self, host_id: int) -> Optional[Dict[str, Any]]:
+        """Get host by ID.
+
+        Args:
+            host_id: Host ID
+
+        Returns:
+            Host dictionary or None if not found
+        """
+        session = self.Session()
+        try:
+            stmt = select(Host).where(Host.host_id == host_id)
+            host = session.execute(stmt).scalar_one_or_none()
+
+            if not host:
+                return None
+
+            return {
+                "host_id": host.host_id,
+                "session_id": host.session_id,
+                "hostname": host.hostname,
+                "ssh_user": host.ssh_user,
+                "kernel_path": host.kernel_path,
+                "bisect_path": host.bisect_path,
+                "test_script": host.test_script,
+                "ipmi_host": host.ipmi_host,
+                "ipmi_user": host.ipmi_user,
+                "ipmi_password": host.ipmi_password,
+            }
+        finally:
+            session.close()
+
+    def create_iteration_result(
+        self,
+        iteration_id: int,
+        host_id: int,
+        build_result: Optional[str] = None,
+        boot_result: Optional[str] = None,
+        test_result: Optional[str] = None,
+        final_result: Optional[str] = None,
+        error_message: Optional[str] = None,
+        test_output: Optional[str] = None,
+    ) -> int:
+        """Create per-host iteration result.
+
+        Args:
+            iteration_id: Iteration ID
+            host_id: Host ID
+            build_result: Build result (success, failure)
+            boot_result: Boot result (success, failure, timeout)
+            test_result: Test result (pass, fail)
+            final_result: Final verdict (good, bad, skip)
+            error_message: Optional error message
+            test_output: Optional test output
+
+        Returns:
+            Result ID
+
+        Raises:
+            DatabaseError: If result creation fails
+        """
+        session = self.Session()
+        try:
+            new_result = IterationResult(
+                iteration_id=iteration_id,
+                host_id=host_id,
+                build_result=build_result,
+                boot_result=boot_result,
+                test_result=test_result,
+                final_result=final_result,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_message=error_message,
+                test_output=test_output,
+            )
+
+            session.add(new_result)
+            session.commit()
+            result_id = new_result.result_id
+
+            logger.debug(f"Created iteration result {result_id} for host {host_id}")
+            return result_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create iteration result: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def update_iteration_result(self, result_id: int, **kwargs: Any) -> None:
+        """Update iteration result fields.
+
+        Args:
+            result_id: Result ID to update
+            **kwargs: Fields to update
+
+        Raises:
+            DatabaseError: If update fails
+        """
+        session = self.Session()
+        try:
+            stmt = select(IterationResult).where(IterationResult.result_id == result_id)
+            db_result = session.execute(stmt).scalar_one_or_none()
+
+            if not db_result:
+                logger.warning(f"IterationResult {result_id} not found for update")
+                return
+
+            # Update allowed fields
+            valid_fields = {
+                "build_result",
+                "boot_result",
+                "test_result",
+                "final_result",
+                "error_message",
+                "test_output",
+            }
+            for field, value in kwargs.items():
+                if field in valid_fields:
+                    setattr(db_result, field, value)
+
+            # Update timestamp
+            db_result.timestamp = datetime.now(timezone.utc).isoformat()
+
+            session.commit()
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to update iteration result: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def get_iteration_results(self, iteration_id: int) -> List[Dict[str, Any]]:
+        """Get all per-host results for an iteration.
+
+        Args:
+            iteration_id: Iteration ID
+
+        Returns:
+            List of result dictionaries with host information
+        """
+        session = self.Session()
+        try:
+            stmt = (
+                select(IterationResult, Host)
+                .join(Host, IterationResult.host_id == Host.host_id)
+                .where(IterationResult.iteration_id == iteration_id)
+                .order_by(Host.host_id)
+            )
+            results = session.execute(stmt).all()
+
+            return [
+                {
+                    "result_id": result.result_id,
+                    "iteration_id": result.iteration_id,
+                    "host_id": result.host_id,
+                    "hostname": host.hostname,
+                    "build_result": result.build_result,
+                    "boot_result": result.boot_result,
+                    "test_result": result.test_result,
+                    "final_result": result.final_result,
+                    "timestamp": result.timestamp,
+                    "error_message": result.error_message,
+                    "test_output": result.test_output,
+                }
+                for result, host in results
+            ]
         finally:
             session.close()
 
