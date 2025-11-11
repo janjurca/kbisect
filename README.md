@@ -383,7 +383,6 @@ kbisect init-config --force
 your-bisection-dir/
 ├── bisect.yaml       # Configuration
 ├── bisect.db         # SQLite database (state, logs, metadata)
-└── configs/          # Kernel .config files (one per iteration)
 ```
 
 ## License
