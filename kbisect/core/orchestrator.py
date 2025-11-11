@@ -369,7 +369,7 @@ class BisectMaster:
 
         try:
             metadata_id = self.state.store_metadata(
-                self.session_id, minimal_metadata, iteration_id
+                self.session_id, minimal_metadata, iteration_id, host_id=self.host_managers[0].host_id
             )
             logger.debug(f"Created placeholder metadata record (id: {metadata_id}) for iteration {iteration_id}")
             return metadata_id
@@ -421,7 +421,7 @@ class BisectMaster:
                     return True
 
         # No existing record found - create new one
-        self.state.store_metadata(self.session_id, metadata_dict, iteration_id)
+        self.state.store_metadata(self.session_id, metadata_dict, iteration_id, host_id=self.host_managers[0].host_id)
         logger.debug(f"✓ Stored {collection_type} metadata")
 
         return True
@@ -463,6 +463,7 @@ class BisectMaster:
                 iteration_id=iteration_id,
                 file_type="kernel_config",
                 file_content=config_content,
+                host_id=self.host_managers[0].host_id,
                 kernel_version=kernel_version,
             )
             logger.info(f"✓ Captured kernel config from build directory in DB (metadata_id: {metadata_id})")
@@ -840,7 +841,7 @@ class BisectMaster:
         log_header += f"Config: {kernel_config or 'default'}\n\n"
         log_header += "=== BUILD OUTPUT ===\n"
 
-        log_id = self.state.create_build_log(iteration_id, "build", log_header)
+        log_id = self.state.create_build_log(iteration_id, "build", log_header, host_id=host_manager.host_id)
 
         # Streaming state
         buffer = []
@@ -978,7 +979,7 @@ class BisectMaster:
         log_header += f"Timeout: {host_manager.test_timeout}s\n\n"
         log_header += "=== TEST OUTPUT ===\n"
 
-        log_id = self.state.create_build_log(iteration_id, "test", log_header)
+        log_id = self.state.create_build_log(iteration_id, "test", log_header, host_id=host_manager.host_id)
 
         # Streaming state
         buffer = []
