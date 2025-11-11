@@ -54,8 +54,8 @@ Each bisection case gets its own directory with its own config file.
 mkdir ~/my-bisection
 cd ~/my-bisection
 
-# Copy example config
-python3 -c "import kbisect; from pathlib import Path; import shutil; src = Path(kbisect.__file__).parent / 'config' / 'bisect.conf.example'; shutil.copy(src, 'bisect.yaml')"
+# Generate config file
+kbisect init-config
 
 # Edit the config
 vim bisect.yaml
@@ -78,6 +78,12 @@ ipmi:                            # Optional but recommended
 ### Key Optional Settings
 
 ```yaml
+# Automatic kernel repository deployment
+# If configured, kbisect will clone/copy the kernel repo to slave
+kernel_repo:
+  source: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+  branch: master  # Optional: specific branch to checkout
+
 # Use custom kernel config
 kernel_config:
   config_file: /path/to/.config  # OR
@@ -94,6 +100,8 @@ console_logs:
   enabled: true
   collector: "auto"  # Try conserver, fall back to IPMI SOL
 ```
+
+**Note:** If `kernel_repo` is not configured, you must manually clone the kernel source to `/root/kernel` on the slave before running init.
 
 ## Usage
 
@@ -136,12 +144,20 @@ else
 fi
 ```
 
-Run bisection with custom test:
+Configure the test script in your bisect.yaml:
+
+```yaml
+test:
+  type: custom
+  script: ./test-network.sh  # Path to your test script
+```
+
+Then run bisection:
 
 ```bash
 chmod +x test-network.sh
 kbisect init v6.1 v6.6
-kbisect start --test-script ./test-network.sh
+kbisect start
 ```
 
 **Note:** When using custom tests, kernels that fail to boot are automatically marked as SKIP (can't test functionality if kernel doesn't boot).
@@ -156,7 +172,24 @@ kbisect start
 
 ## How It Works
 
-1. Master deploys bash library to slave
+```
+┌──────────────────┐                    ┌──────────────────┐
+│  Master Machine  │────────SSH─────────│  Slave Machine   │
+│                  │                    │                  │
+│  • Orchestrates  │                    │  • Builds kernel │
+│  • Makes         │                    │  • Boots kernel  │
+│    decisions     │                    │  • Runs tests    │
+│  • Stores state  │                    │                  │
+│    in SQLite     │                    │                  │
+└────────┬─────────┘                    └──────────────────┘
+         │                                       ▲
+         │         IPMI (Power Control)          │
+         └───────────────────────────────────────┘
+```
+
+**Workflow for each commit:**
+
+1. Master deploys bash library to slave (first run only)
 2. Protects your current kernel from deletion
 3. For each commit in the bisection range:
    - Builds kernel on slave
@@ -214,16 +247,43 @@ ssh root@<slave-ip> 'dnf groupinstall "Development Tools" && dnf install ncurses
 ssh root@<slave-ip> 'apt install build-essential libncurses-dev bc bison flex libelf-dev libssl-dev'
 ```
 
+## Global Options
+
+All kbisect commands support these global options:
+
+```bash
+# Use custom config file (default: bisect.yaml)
+kbisect -c /path/to/config.yaml <command>
+
+# Enable verbose/debug output
+kbisect --verbose <command>
+kbisect -v <command>
+
+# Example
+kbisect -v -c my-config.yaml start
+```
+
 ## Advanced Usage
 
 ### Use specific kernel config
 
-```bash
+Configure kernel config in your bisect.yaml before running init:
+
+```yaml
 # Option 1: Provide config file
-kbisect init v6.1 v6.6 --kernel-config /path/to/.config
+kernel_config:
+  config_file: /path/to/.config
 
 # Option 2: Use running kernel's config
-kbisect init v6.1 v6.6 --use-running-config
+kernel_config:
+  use_running_config: true
+```
+
+Then run bisection:
+
+```bash
+kbisect init v6.1 v6.6
+kbisect start
 ```
 
 ### Monitor slave health
@@ -247,6 +307,28 @@ kbisect logs show <log-id>
 
 # View logs for iteration
 kbisect logs iteration 3
+
+# Follow log in real-time
+kbisect logs tail <log-id>
+
+# Export log to file
+kbisect logs export <log-id> /tmp/build.log
+```
+
+### View metadata
+
+```bash
+# List all metadata
+kbisect metadata list
+
+# Show specific metadata
+kbisect metadata show <metadata-id>
+
+# Export metadata to file
+kbisect metadata export <metadata-id> -o metadata.json
+
+# Export metadata file
+kbisect metadata export-file <file-id> -o config.txt
 ```
 
 ### Manual IPMI control
@@ -260,6 +342,39 @@ kbisect ipmi cycle
 
 # Power off
 kbisect ipmi off
+```
+
+### Deployment options
+
+```bash
+# Verify deployment without making changes
+kbisect deploy --verify-only
+
+# Update library only (don't full redeploy)
+kbisect deploy --update-only
+
+# Force deployment during init
+kbisect init v6.1 v6.6 --force-deploy
+```
+
+### Reinitialize bisection
+
+```bash
+# Reinitialize bisection range
+kbisect start --reinit
+```
+
+### Generate config file with custom name
+
+```bash
+# Default (creates bisect.yaml)
+kbisect init-config
+
+# Custom filename
+kbisect init-config -o my-config.yaml
+
+# Overwrite existing without prompt
+kbisect init-config --force
 ```
 
 ## Project Structure
