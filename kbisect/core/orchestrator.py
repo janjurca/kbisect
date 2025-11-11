@@ -315,19 +315,38 @@ class BisectMaster:
         # Console collector (created per boot cycle)
         self.active_console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
 
-        # Resolve test script paths for each host
+        # Resolve test script paths for each host and copy local scripts to remote
         for host_manager in self.host_managers:
             test_script = host_manager.config.test_script
             if test_script:
                 script_path = Path(test_script)
                 if script_path.exists():
-                    # It's a local file on master - use remote path for execution
+                    # It's a local file on master - copy to remote and update path
                     logger.debug(f"Test script is local file on master: {test_script}")
                     bisect_base_dir = Path(host_manager.config.bisect_path).parent
                     remote_script_dir = bisect_base_dir / "test-scripts"
                     remote_script_path = str(remote_script_dir / script_path.name)
+
+                    # Create remote test-scripts directory
+                    logger.info(f"Creating test-scripts directory on {host_manager.config.hostname}...")
+                    ret, _, stderr = host_manager.ssh.run_command(f"mkdir -p {remote_script_dir}")
+                    if ret != 0:
+                        logger.error(f"Failed to create test-scripts directory: {stderr}")
+                        raise RuntimeError(f"Failed to create test-scripts directory on {host_manager.config.hostname}")
+
+                    # Copy test script to remote host
+                    logger.info(f"Copying test script to {host_manager.config.hostname}:{remote_script_path}...")
+                    if not host_manager.ssh.copy_file(str(script_path), remote_script_path):
+                        raise RuntimeError(f"Failed to copy test script to {host_manager.config.hostname}")
+
+                    # Make test script executable
+                    ret, _, stderr = host_manager.ssh.run_command(f"chmod +x {remote_script_path}")
+                    if ret != 0:
+                        logger.warning(f"Failed to make test script executable: {stderr}")
+
+                    # Update config to use remote path
                     host_manager.config.test_script = remote_script_path
-                    logger.debug(f"Resolved test script to slave path: {remote_script_path}")
+                    logger.info(f"✓ Test script deployed to {host_manager.config.hostname}:{remote_script_path}")
 
     def create_iteration_metadata_record(self, iteration_id: int) -> Optional[int]:
         """Create a minimal metadata record for an iteration.
