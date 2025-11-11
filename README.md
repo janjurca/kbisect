@@ -44,16 +44,6 @@ ssh-copy-id root@<slave-ip>
 ssh root@<slave-ip> 'echo "SSH works"'
 ```
 
-### 3. Prepare Slave
-
-```bash
-# On slave machine: Clone kernel source
-ssh root@<slave-ip>
-git clone https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git /root/kernel
-exit
-
-# That's it! The tool will deploy everything else automatically.
-```
 
 ## Configuration
 
