@@ -709,6 +709,67 @@ class StateManager:
         finally:
             session.close()
 
+    def create_iteration_results_bulk(
+        self,
+        results: List[Dict[str, Any]]
+    ) -> List[int]:
+        """Create multiple per-host iteration results in a single transaction.
+
+        Args:
+            results: List of result dictionaries, each containing:
+                - iteration_id: Iteration ID
+                - host_id: Host ID
+                - build_result: Build result (success, failure)
+                - boot_result: Boot result (success, failure, timeout)
+                - test_result: Test result (pass, fail)
+                - final_result: Final verdict (good, bad, skip)
+                - error_message: Optional error message
+                - test_output: Optional test output
+
+        Returns:
+            List of result IDs
+
+        Raises:
+            DatabaseError: If bulk creation fails
+        """
+        session = self.Session()
+        try:
+            result_ids = []
+            current_timestamp = datetime.now(timezone.utc).isoformat()
+
+            for result_data in results:
+                new_result = IterationResult(
+                    iteration_id=result_data['iteration_id'],
+                    host_id=result_data['host_id'],
+                    build_result=result_data.get('build_result'),
+                    boot_result=result_data.get('boot_result'),
+                    test_result=result_data.get('test_result'),
+                    final_result=result_data.get('final_result'),
+                    timestamp=current_timestamp,
+                    error_message=result_data.get('error_message'),
+                    test_output=result_data.get('test_output'),
+                )
+                session.add(new_result)
+
+            # Commit all results at once
+            session.commit()
+
+            # Get result IDs after commit
+            for obj in session.new:
+                if isinstance(obj, IterationResult):
+                    result_ids.append(obj.result_id)
+
+            logger.debug(f"Created {len(result_ids)} iteration results in bulk")
+            return result_ids
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create iteration results in bulk: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
     def update_iteration_result(self, result_id: int, **kwargs: Any) -> None:
         """Update iteration result fields.
 
