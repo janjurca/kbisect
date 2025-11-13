@@ -28,20 +28,29 @@ hosts:
     kernel_path: /root/kernel         # Path to kernel source on this host
     bisect_path: /root/kernel-bisect/lib  # Path to bisect library
     test_script: test-server.sh       # Role-specific test script (or test.sh for single host)
-    # Optional per-host IPMI configuration
+
+    # Power control configuration (per-host)
+    # Options: "ipmi", "beaker", or null (SSH reboot fallback)
+    # Default: "ipmi" if not specified
+    power_control_type: ipmi          # Use IPMI for power control
+
+    # IPMI configuration (required if power_control_type is "ipmi")
     ipmi_host: 192.168.1.101          # IPMI interface for this host
     ipmi_user: admin
     ipmi_password: changeme
 
   # Example: Second host for multi-host testing (remove if only testing one host)
-  - hostname: 192.168.1.200          # Second host (e.g., client)
+  # This example shows Beaker power control
+  - hostname: server2.example.com    # Second host (e.g., client)
     ssh_user: root
     kernel_path: /root/kernel
     bisect_path: /root/kernel-bisect/lib
     test_script: test-client.sh       # Different test script for client role
-    ipmi_host: 192.168.1.201
-    ipmi_user: admin
-    ipmi_password: changeme
+
+    # Use Beaker for power control (requires bkr client installed and Kerberos auth)
+    power_control_type: beaker        # Use Beaker lab automation for power control
+    # Note: Beaker uses the hostname for system identification
+    # Ensure you're authenticated (kinit) before running bisection
 
 # Kernel repository (optional - automatic repository deployment)
 # If configured, the repository will be cloned/copied on master and transferred to all hosts

@@ -197,6 +197,7 @@ class Host(Base):
     kernel_path: Mapped[str] = mapped_column(String, nullable=False)
     bisect_path: Mapped[str] = mapped_column(String, nullable=False)
     test_script: Mapped[str] = mapped_column(String, nullable=False)
+    power_control_type: Mapped[Optional[str]] = mapped_column(String, nullable=True, default="ipmi")
     ipmi_host: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     ipmi_user: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     ipmi_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)

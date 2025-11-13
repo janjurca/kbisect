@@ -66,6 +66,7 @@ class HostConfig:
         kernel_path: Path to kernel source directory on host
         bisect_path: Path to bisect library on host
         test_script: Path to test script for this host (role-specific)
+        power_control_type: Power control method ("ipmi", "beaker", or None for SSH fallback)
         ipmi_host: Optional IPMI interface hostname or IP
         ipmi_user: Optional IPMI username
         ipmi_password: Optional IPMI password
@@ -76,6 +77,7 @@ class HostConfig:
     kernel_path: str = "/root/kernel"
     bisect_path: str = "/root/kernel-bisect/lib"
     test_script: str = "test.sh"
+    power_control_type: Optional[str] = "ipmi"
     ipmi_host: Optional[str] = None
     ipmi_user: Optional[str] = None
     ipmi_password: Optional[str] = None
@@ -174,13 +176,13 @@ class HostManager:
     """Manages a single host in multi-host bisection.
 
     Encapsulates per-host resources and operations including SSH client,
-    IPMI controller, and console collector.
+    power controller, and console collector.
 
     Attributes:
         config: Host configuration
         host_id: Database host ID
         ssh: SSH client for this host
-        ipmi_controller: IPMI controller for this host (optional)
+        power_controller: Power controller for this host (optional)
         console_collector: Console log collector for this host (optional)
     """
 
@@ -210,20 +212,25 @@ class HostManager:
         # Create SSH client for this host
         self.ssh = SSHClient(host_config.hostname, host_config.ssh_user)
 
-        # Create IPMI controller if configured for this host
-        self.ipmi_controller: Optional["IPMIController"] = None  # noqa: UP037
-        if (
-            host_config.ipmi_host
-            and host_config.ipmi_user
-            and host_config.ipmi_password
-        ):
-            from kbisect.power import IPMIController
+        # Create power controller based on configured type
+        self.power_controller: Optional["PowerController"] = None  # noqa: UP037
+        if host_config.power_control_type == "ipmi":
+            if (
+                host_config.ipmi_host
+                and host_config.ipmi_user
+                and host_config.ipmi_password
+            ):
+                from kbisect.power import IPMIController
 
-            self.ipmi_controller = IPMIController(
-                host_config.ipmi_host,
-                host_config.ipmi_user,
-                host_config.ipmi_password,
-            )
+                self.power_controller = IPMIController(
+                    host_config.ipmi_host,
+                    host_config.ipmi_user,
+                    host_config.ipmi_password,
+                )
+        elif host_config.power_control_type == "beaker":
+            from kbisect.power import BeakerController
+
+            self.power_controller = BeakerController(host_config.hostname)
 
         # Console collector (created per boot cycle)
         self.console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
@@ -292,6 +299,7 @@ class BisectMaster:
                 kernel_path=host_config.kernel_path,
                 bisect_path=host_config.bisect_path,
                 test_script=host_config.test_script,
+                power_control_type=host_config.power_control_type,
                 ipmi_host=host_config.ipmi_host,
                 ipmi_user=host_config.ipmi_user,
                 ipmi_password=host_config.ipmi_password,
@@ -308,9 +316,9 @@ class BisectMaster:
             self.host_managers.append(host_manager)
             logger.info(f"  [{host_config.hostname}] HostManager created (host_id={host_id})")
 
-        # Set ssh and ipmi_controller to first host for convenience in some methods
+        # Set ssh and power_controller to first host for convenience in some methods
         self.ssh = self.host_managers[0].ssh
-        self.ipmi_controller = self.host_managers[0].ipmi_controller
+        self.power_controller = self.host_managers[0].power_controller
 
         # Console collector (created per boot cycle)
         self.active_console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
@@ -1046,8 +1054,16 @@ class BisectMaster:
         hostname = host_manager.config.hostname
         logger.info(f"  [{hostname}] Rebooting...")
 
-        # Send reboot command
-        host_manager.ssh.run_command("reboot", timeout=5)
+        # Use power controller if available, otherwise fall back to SSH reboot
+        if host_manager.power_controller:
+            logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
+            if not host_manager.power_controller.reset():
+                logger.error(f"  [{hostname}] Power controller reset failed")
+                return False, None
+        else:
+            logger.info(f"  [{hostname}] Using SSH reboot command")
+            # Send reboot command via SSH
+            host_manager.ssh.run_command("reboot", timeout=5)
 
         # Wait for reboot to start
         time.sleep(DEFAULT_REBOOT_SETTLE_TIME)

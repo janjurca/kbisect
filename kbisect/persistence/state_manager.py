@@ -535,6 +535,7 @@ class StateManager:
         kernel_path: str,
         bisect_path: str,
         test_script: str,
+        power_control_type: Optional[str] = "ipmi",
         ipmi_host: Optional[str] = None,
         ipmi_user: Optional[str] = None,
         ipmi_password: Optional[str] = None,
@@ -548,6 +549,7 @@ class StateManager:
             kernel_path: Path to kernel directory on host
             bisect_path: Path to bisect scripts on host
             test_script: Path to test script for this host
+            power_control_type: Power control method ("ipmi", "beaker", or None)
             ipmi_host: Optional IPMI hostname
             ipmi_user: Optional IPMI username
             ipmi_password: Optional IPMI password
@@ -567,6 +569,7 @@ class StateManager:
                 kernel_path=kernel_path,
                 bisect_path=bisect_path,
                 test_script=test_script,
+                power_control_type=power_control_type,
                 ipmi_host=ipmi_host,
                 ipmi_user=ipmi_user,
                 ipmi_password=ipmi_password,
