@@ -320,9 +320,6 @@ class BisectMaster:
         self.ssh = self.host_managers[0].ssh
         self.power_controller = self.host_managers[0].power_controller
 
-        # Console collector (created per boot cycle)
-        self.active_console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
-
         # Resolve test script paths for each host and store local paths for transfer
         self._local_test_scripts = {}  # Store mapping of host_id -> local_script_path for transfer
         for host_manager in self.host_managers:
@@ -1180,6 +1177,334 @@ class BisectMaster:
     # End of Per-Host Helper Methods
     # ===========================================================================
 
+    # ===========================================================================
+    # Phase Extraction Methods
+    # ===========================================================================
+
+    def _validate_commit_phase(
+        self, commit_sha: str, iteration: "BisectIteration"
+    ) -> Tuple[bool, bool]:
+        """Phase 0: Validate commit exists on all hosts.
+
+        Args:
+            commit_sha: Commit SHA to validate
+            iteration: Iteration object to update on failure
+
+        Returns:
+            Tuple of (phase_succeeded, bisection_complete)
+        """
+        logger.debug(f"Validating commit {commit_sha[:7]} exists on all hosts...")
+        all_valid, missing_hosts = self._validate_commit_on_all_hosts(commit_sha)
+
+        if not all_valid:
+            logger.error(f"Commit {commit_sha[:7]} not found on hosts: {', '.join(missing_hosts)}")
+            iteration.result = TestResult.SKIP
+            iteration.error = f"Commit not found on hosts: {', '.join(missing_hosts)}"
+
+            # Mark commit as skip in git bisect
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+            if not success:
+                logger.error("Failed to mark commit as SKIP in git bisect")
+
+            return (False, bisection_complete)
+
+        logger.debug(f"✓ Commit {commit_sha[:7]} exists on all hosts")
+        return (True, False)
+
+    def _build_phase(
+        self, commit_sha: str, iteration_id: int, iteration: "BisectIteration"
+    ) -> Tuple[bool, dict, bool]:
+        """Phase 1: Build kernel on all hosts in parallel.
+
+        Args:
+            commit_sha: Commit SHA to build
+            iteration_id: Database iteration ID
+            iteration: Iteration object to update on failure
+
+        Returns:
+            Tuple of (phase_succeeded, build_results dict, bisection_complete)
+        """
+        iteration.state = BisectState.BUILDING
+        logger.info(f"Building kernel on {len(self.host_managers)} hosts...")
+
+        build_results = {}
+        # Add 10% buffer to configured timeout for parallel execution overhead
+        overall_timeout = self.config.build_timeout * 1.1
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._build_on_host,
+                    host_manager,
+                    commit_sha,
+                    iteration_id
+                ): host_manager
+                for host_manager in self.host_managers
+            }
+
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    host_manager = futures[future]
+                    try:
+                        success, exit_code, log_id, kernel_ver = future.result()
+                        build_results[host_manager.host_id] = {
+                            'success': success,
+                            'kernel_ver': kernel_ver,
+                            'exit_code': exit_code,
+                            'log_id': log_id
+                        }
+                    except Exception as e:
+                        logger.error(f"  [{host_manager.config.hostname}] Build exception: {e}")
+                        build_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': str(e)
+                        }
+            except TimeoutError:
+                logger.error(f"Build phase timed out after {overall_timeout}s")
+                # Mark any hosts without results as timed out
+                for host_manager in self.host_managers:
+                    if host_manager.host_id not in build_results:
+                        logger.error(f"  [{host_manager.config.hostname}] Build timed out")
+                        build_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': f'Build timed out after {overall_timeout}s'
+                        }
+
+        # Check if any build failed
+        if not all(r.get('success', False) for r in build_results.values()):
+            logger.error("One or more hosts failed to build - marking iteration SKIP")
+            iteration.result = TestResult.SKIP
+            iteration.error = "Build failed on one or more hosts"
+
+            # Prepare bulk results for all hosts
+            bulk_results = []
+            for host_manager in self.host_managers:
+                result_data = build_results.get(host_manager.host_id, {})
+                # Ensure error message is populated even if build failed without exception
+                error_msg = result_data.get('error')
+                if not error_msg and not result_data.get('success'):
+                    error_msg = f"Build failed with exit code {result_data.get('exit_code', 'unknown')}"
+
+                bulk_results.append({
+                    'iteration_id': iteration_id,
+                    'host_id': host_manager.host_id,
+                    'build_result': "failure" if not result_data.get('success') else "success",
+                    'final_result': "skip",
+                    'error_message': error_msg
+                })
+
+            # Store all results in a single transaction
+            self.state.create_iteration_results_bulk(bulk_results)
+
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+            if not success:
+                logger.error("Failed to mark commit as SKIP in git bisect")
+
+            return (False, build_results, bisection_complete)
+
+        logger.info("✓ All hosts built successfully")
+        return (True, build_results, False)
+
+    def _reboot_phase(
+        self, iteration_id: int, build_results: dict, commit_sha: str, iteration: "BisectIteration"
+    ) -> Tuple[bool, dict, bool]:
+        """Phase 2: Reboot all hosts in parallel.
+
+        Args:
+            iteration_id: Database iteration ID
+            build_results: Results from build phase (contains kernel versions)
+            commit_sha: Commit SHA being tested
+            iteration: Iteration object to update on failure
+
+        Returns:
+            Tuple of (phase_succeeded, reboot_results dict, bisection_complete)
+        """
+        iteration.state = BisectState.REBOOTING
+        logger.info(f"Rebooting {len(self.host_managers)} hosts...")
+
+        reboot_results = {}
+        # Add 10% buffer to configured timeout for parallel execution overhead
+        overall_timeout = self.config.boot_timeout * 1.1
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._reboot_host,
+                    host_manager,
+                    iteration_id,
+                    build_results[host_manager.host_id].get('kernel_ver')  # Use .get() to handle missing key
+                ): host_manager
+                for host_manager in self.host_managers
+            }
+
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    host_manager = futures[future]
+                    try:
+                        success, actual_kernel_ver = future.result()
+                        reboot_results[host_manager.host_id] = {
+                            'success': success,
+                            'actual_kernel_ver': actual_kernel_ver
+                        }
+                    except Exception as e:
+                        logger.error(f"  [{host_manager.config.hostname}] Reboot exception: {e}")
+                        reboot_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': str(e)
+                        }
+            except TimeoutError:
+                logger.error(f"Reboot phase timed out after {overall_timeout}s")
+                # Mark any hosts without results as timed out
+                for host_manager in self.host_managers:
+                    if host_manager.host_id not in reboot_results:
+                        logger.error(f"  [{host_manager.config.hostname}] Reboot timed out")
+                        reboot_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': f'Reboot timed out after {overall_timeout}s'
+                        }
+
+        # Check if any reboot failed
+        if not all(r.get('success', False) for r in reboot_results.values()):
+            logger.error("One or more hosts failed to reboot - marking iteration SKIP")
+            iteration.result = TestResult.SKIP
+            iteration.error = "Boot failed on one or more hosts"
+
+            # Prepare bulk results for all hosts
+            bulk_results = []
+            for host_manager in self.host_managers:
+                result_data = reboot_results.get(host_manager.host_id, {})
+                bulk_results.append({
+                    'iteration_id': iteration_id,
+                    'host_id': host_manager.host_id,
+                    'build_result': "success",
+                    'boot_result': "failure" if not result_data.get('success') else "success",
+                    'final_result': "skip",
+                    'error_message': result_data.get('error')
+                })
+
+            # Store all results in a single transaction
+            self.state.create_iteration_results_bulk(bulk_results)
+
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+            if not success:
+                logger.error("Failed to mark commit as SKIP in git bisect")
+
+            return (False, reboot_results, bisection_complete)
+
+        logger.info("✓ All hosts rebooted successfully")
+        return (True, reboot_results, False)
+
+    def _test_and_aggregate_phase(
+        self, iteration_id: int, commit_sha: str, iteration: "BisectIteration"
+    ) -> bool:
+        """Phase 3 & 4: Run tests on all hosts and aggregate results.
+
+        Args:
+            iteration_id: Database iteration ID
+            commit_sha: Commit SHA being tested
+            iteration: Iteration object to update with results
+
+        Returns:
+            bisection_complete flag
+        """
+        iteration.state = BisectState.TESTING
+        logger.info(f"Running tests on {len(self.host_managers)} hosts...")
+
+        test_results = {}
+        # Add 10% buffer to configured timeout for parallel execution overhead
+        overall_timeout = self.config.test_timeout * 1.1
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._test_on_host,
+                    host_manager,
+                    iteration_id
+                ): host_manager
+                for host_manager in self.host_managers
+            }
+
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    host_manager = futures[future]
+                    try:
+                        test_result, test_output = future.result()
+                        test_results[host_manager.host_id] = {
+                            'result': test_result,
+                            'output': test_output
+                        }
+                    except Exception as e:
+                        logger.error(f"  [{host_manager.config.hostname}] Test exception: {e}")
+                        test_results[host_manager.host_id] = {
+                            'result': TestResult.SKIP,
+                            'error': str(e)
+                        }
+            except TimeoutError:
+                logger.error(f"Test phase timed out after {overall_timeout}s")
+                # Mark any hosts without results as timed out
+                for host_manager in self.host_managers:
+                    if host_manager.host_id not in test_results:
+                        logger.error(f"  [{host_manager.config.hostname}] Test timed out")
+                        test_results[host_manager.host_id] = {
+                            'result': TestResult.SKIP,
+                            'error': f'Test timed out after {overall_timeout}s'
+                        }
+
+        # Prepare bulk results for all hosts
+        bulk_results = []
+        for host_manager in self.host_managers:
+            result_data = test_results.get(host_manager.host_id, {})
+            test_result = result_data.get('result', TestResult.SKIP)
+            bulk_results.append({
+                'iteration_id': iteration_id,
+                'host_id': host_manager.host_id,
+                'build_result': "success",
+                'boot_result': "success",
+                'test_result': test_result.value,
+                'final_result': test_result.value,
+                'test_output': result_data.get('output', ''),
+                'error_message': result_data.get('error')
+            })
+
+        # Store all results in a single transaction
+        self.state.create_iteration_results_bulk(bulk_results)
+
+        # Aggregate: ALL pass = GOOD, ANY fail = BAD, ANY skip = SKIP
+        all_results = [r['result'] for r in test_results.values()]
+
+        if all(r == TestResult.GOOD for r in all_results):
+            final_result = TestResult.GOOD
+            logger.info("✓ All hosts passed - marking commit GOOD")
+        elif any(r == TestResult.BAD for r in all_results):
+            final_result = TestResult.BAD
+            # Show which hosts failed
+            failed_hosts = [
+                host_manager.config.hostname
+                for host_manager in self.host_managers
+                if test_results[host_manager.host_id]['result'] == TestResult.BAD
+            ]
+            logger.error(f"✗ Failed on: {', '.join(failed_hosts)} - marking commit BAD")
+        else:
+            final_result = TestResult.SKIP
+            logger.warning("One or more hosts skipped - marking commit SKIP")
+
+        iteration.result = final_result
+
+        # Update iteration in database
+        self.state.update_iteration(
+            iteration_id,
+            final_result=final_result.value,
+            end_time=datetime.now(timezone.utc).isoformat()
+        )
+
+        # Mark in git bisect
+        success, bisection_complete = self.mark_commit(commit_sha, final_result)
+        if not success:
+            logger.error("Failed to mark commit in git bisect - bisection state may be inconsistent")
+
+        return bisection_complete
+
+    # ===========================================================================
+    # End of Phase Extraction Methods
+    # ===========================================================================
+
     def _run_multihost_iteration(
         self,
         iteration: BisectIteration,
@@ -1199,283 +1524,27 @@ class BisectMaster:
         bisection_complete = False
 
         try:
-            # ===================================================================
-            # PHASE 0: Validate commit exists on all hosts
-            # ===================================================================
-            logger.debug(f"Validating commit {commit_sha[:7]} exists on all hosts...")
-            all_valid, missing_hosts = self._validate_commit_on_all_hosts(commit_sha)
-
-            if not all_valid:
-                logger.error(f"Commit {commit_sha[:7]} not found on hosts: {', '.join(missing_hosts)}")
-                iteration.result = TestResult.SKIP
-                iteration.error = f"Commit not found on hosts: {', '.join(missing_hosts)}"
-
-                # Mark commit as skip in git bisect
-                success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
-                if not success:
-                    logger.error("Failed to mark commit as SKIP in git bisect")
-
+            # Phase 0: Validate commit
+            phase_ok, bisection_complete = self._validate_commit_phase(commit_sha, iteration)
+            if not phase_ok:
                 return (iteration, bisection_complete)
 
-            logger.debug(f"✓ Commit {commit_sha[:7]} exists on all hosts")
-
-            # ===================================================================
-            # PHASE 1: Build kernel on all hosts in parallel
-            # ===================================================================
-            iteration.state = BisectState.BUILDING
-            logger.info(f"Building kernel on {len(self.host_managers)} hosts...")
-
-            build_results = {}
-            # Add 10% buffer to configured timeout for parallel execution overhead
-            overall_timeout = self.config.build_timeout * 1.1
-            with ThreadPoolExecutor() as executor:
-                futures = {
-                    executor.submit(
-                        self._build_on_host,
-                        host_manager,
-                        commit_sha,
-                        iteration_id
-                    ): host_manager
-                    for host_manager in self.host_managers
-                }
-
-                try:
-                    for future in as_completed(futures, timeout=overall_timeout):
-                        host_manager = futures[future]
-                        try:
-                            success, exit_code, log_id, kernel_ver = future.result()
-                            build_results[host_manager.host_id] = {
-                                'success': success,
-                                'kernel_ver': kernel_ver,
-                                'exit_code': exit_code,
-                                'log_id': log_id
-                            }
-                        except Exception as e:
-                            logger.error(f"  [{host_manager.config.hostname}] Build exception: {e}")
-                            build_results[host_manager.host_id] = {
-                                'success': False,
-                                'error': str(e)
-                            }
-                except TimeoutError:
-                    logger.error(f"Build phase timed out after {overall_timeout}s")
-                    # Mark any hosts without results as timed out
-                    for host_manager in self.host_managers:
-                        if host_manager.host_id not in build_results:
-                            logger.error(f"  [{host_manager.config.hostname}] Build timed out")
-                            build_results[host_manager.host_id] = {
-                                'success': False,
-                                'error': f'Build timed out after {overall_timeout}s'
-                            }
-
-            # Check if any build failed
-            if not all(r.get('success', False) for r in build_results.values()):
-                logger.error("One or more hosts failed to build - marking iteration SKIP")
-                iteration.result = TestResult.SKIP
-                iteration.error = "Build failed on one or more hosts"
-
-                # Prepare bulk results for all hosts
-                bulk_results = []
-                for host_manager in self.host_managers:
-                    result_data = build_results.get(host_manager.host_id, {})
-                    # Ensure error message is populated even if build failed without exception
-                    error_msg = result_data.get('error')
-                    if not error_msg and not result_data.get('success'):
-                        error_msg = f"Build failed with exit code {result_data.get('exit_code', 'unknown')}"
-
-                    bulk_results.append({
-                        'iteration_id': iteration_id,
-                        'host_id': host_manager.host_id,
-                        'build_result': "failure" if not result_data.get('success') else "success",
-                        'final_result': "skip",
-                        'error_message': error_msg
-                    })
-
-                # Store all results in a single transaction
-                self.state.create_iteration_results_bulk(bulk_results)
-
-                success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
-                if not success:
-                    logger.error("Failed to mark commit as SKIP in git bisect")
-
-                return (iteration, bisection_complete)
-
-            logger.info("✓ All hosts built successfully")
-
-            # ===================================================================
-            # PHASE 2: Reboot all hosts in parallel
-            # ===================================================================
-            iteration.state = BisectState.REBOOTING
-            logger.info(f"Rebooting {len(self.host_managers)} hosts...")
-
-            reboot_results = {}
-            # Add 10% buffer to configured timeout for parallel execution overhead
-            overall_timeout = self.config.boot_timeout * 1.1
-            with ThreadPoolExecutor() as executor:
-                futures = {
-                    executor.submit(
-                        self._reboot_host,
-                        host_manager,
-                        iteration_id,
-                        build_results[host_manager.host_id].get('kernel_ver')  # Use .get() to handle missing key
-                    ): host_manager
-                    for host_manager in self.host_managers
-                }
-
-                try:
-                    for future in as_completed(futures, timeout=overall_timeout):
-                        host_manager = futures[future]
-                        try:
-                            success, actual_kernel_ver = future.result()
-                            reboot_results[host_manager.host_id] = {
-                                'success': success,
-                                'actual_kernel_ver': actual_kernel_ver
-                            }
-                        except Exception as e:
-                            logger.error(f"  [{host_manager.config.hostname}] Reboot exception: {e}")
-                            reboot_results[host_manager.host_id] = {
-                                'success': False,
-                                'error': str(e)
-                            }
-                except TimeoutError:
-                    logger.error(f"Reboot phase timed out after {overall_timeout}s")
-                    # Mark any hosts without results as timed out
-                    for host_manager in self.host_managers:
-                        if host_manager.host_id not in reboot_results:
-                            logger.error(f"  [{host_manager.config.hostname}] Reboot timed out")
-                            reboot_results[host_manager.host_id] = {
-                                'success': False,
-                                'error': f'Reboot timed out after {overall_timeout}s'
-                            }
-
-            # Check if any reboot failed
-            if not all(r.get('success', False) for r in reboot_results.values()):
-                logger.error("One or more hosts failed to reboot - marking iteration SKIP")
-                iteration.result = TestResult.SKIP
-                iteration.error = "Boot failed on one or more hosts"
-
-                # Prepare bulk results for all hosts
-                bulk_results = []
-                for host_manager in self.host_managers:
-                    result_data = reboot_results.get(host_manager.host_id, {})
-                    bulk_results.append({
-                        'iteration_id': iteration_id,
-                        'host_id': host_manager.host_id,
-                        'build_result': "success",
-                        'boot_result': "failure" if not result_data.get('success') else "success",
-                        'final_result': "skip",
-                        'error_message': result_data.get('error')
-                    })
-
-                # Store all results in a single transaction
-                self.state.create_iteration_results_bulk(bulk_results)
-
-                success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
-                if not success:
-                    logger.error("Failed to mark commit as SKIP in git bisect")
-
-                return (iteration, bisection_complete)
-
-            logger.info("✓ All hosts rebooted successfully")
-
-            # ===================================================================
-            # PHASE 3: Run tests on all hosts in parallel
-            # ===================================================================
-            iteration.state = BisectState.TESTING
-            logger.info(f"Running tests on {len(self.host_managers)} hosts...")
-
-            test_results = {}
-            # Add 10% buffer to configured timeout for parallel execution overhead
-            overall_timeout = self.config.test_timeout * 1.1
-            with ThreadPoolExecutor() as executor:
-                futures = {
-                    executor.submit(
-                        self._test_on_host,
-                        host_manager,
-                        iteration_id
-                    ): host_manager
-                    for host_manager in self.host_managers
-                }
-
-                try:
-                    for future in as_completed(futures, timeout=overall_timeout):
-                        host_manager = futures[future]
-                        try:
-                            test_result, test_output = future.result()
-                            test_results[host_manager.host_id] = {
-                                'result': test_result,
-                                'output': test_output
-                            }
-                        except Exception as e:
-                            logger.error(f"  [{host_manager.config.hostname}] Test exception: {e}")
-                            test_results[host_manager.host_id] = {
-                                'result': TestResult.SKIP,
-                                'error': str(e)
-                            }
-                except TimeoutError:
-                    logger.error(f"Test phase timed out after {overall_timeout}s")
-                    # Mark any hosts without results as timed out
-                    for host_manager in self.host_managers:
-                        if host_manager.host_id not in test_results:
-                            logger.error(f"  [{host_manager.config.hostname}] Test timed out")
-                            test_results[host_manager.host_id] = {
-                                'result': TestResult.SKIP,
-                                'error': f'Test timed out after {overall_timeout}s'
-                            }
-
-            # ===================================================================
-            # PHASE 4: Aggregate results and store per-host data
-            # ===================================================================
-            # Prepare bulk results for all hosts
-            bulk_results = []
-            for host_manager in self.host_managers:
-                result_data = test_results.get(host_manager.host_id, {})
-                test_result = result_data.get('result', TestResult.SKIP)
-                bulk_results.append({
-                    'iteration_id': iteration_id,
-                    'host_id': host_manager.host_id,
-                    'build_result': "success",
-                    'boot_result': "success",
-                    'test_result': test_result.value,
-                    'final_result': test_result.value,
-                    'test_output': result_data.get('output', ''),
-                    'error_message': result_data.get('error')
-                })
-
-            # Store all results in a single transaction
-            self.state.create_iteration_results_bulk(bulk_results)
-
-            # Aggregate: ALL pass = GOOD, ANY fail = BAD, ANY skip = SKIP
-            all_results = [r['result'] for r in test_results.values()]
-
-            if all(r == TestResult.GOOD for r in all_results):
-                final_result = TestResult.GOOD
-                logger.info("✓ All hosts passed - marking commit GOOD")
-            elif any(r == TestResult.BAD for r in all_results):
-                final_result = TestResult.BAD
-                # Show which hosts failed
-                failed_hosts = [
-                    host_manager.config.hostname
-                    for host_manager in self.host_managers
-                    if test_results[host_manager.host_id]['result'] == TestResult.BAD
-                ]
-                logger.error(f"✗ Failed on: {', '.join(failed_hosts)} - marking commit BAD")
-            else:
-                final_result = TestResult.SKIP
-                logger.warning("One or more hosts skipped - marking commit SKIP")
-
-            iteration.result = final_result
-
-            # Update iteration in database
-            self.state.update_iteration(
-                iteration_id,
-                final_result=final_result.value,
-                end_time=datetime.now(timezone.utc).isoformat()
+            # Phase 1: Build
+            phase_ok, build_results, bisection_complete = self._build_phase(
+                commit_sha, iteration_id, iteration
             )
+            if not phase_ok:
+                return (iteration, bisection_complete)
 
-            # Mark in git bisect
-            success, bisection_complete = self.mark_commit(commit_sha, final_result)
-            if not success:
-                logger.error("Failed to mark commit in git bisect - bisection state may be inconsistent")
+            # Phase 2: Reboot
+            phase_ok, reboot_results, bisection_complete = self._reboot_phase(
+                iteration_id, build_results, commit_sha, iteration
+            )
+            if not phase_ok:
+                return (iteration, bisection_complete)
+
+            # Phase 3 & 4: Test and aggregate
+            bisection_complete = self._test_and_aggregate_phase(iteration_id, commit_sha, iteration)
 
         except Exception as exc:
             logger.error(f"Multi-host iteration failed with exception: {exc}")
