@@ -804,7 +804,8 @@ class BisectMaster:
         kernel_path = first_host.config.kernel_path
 
         ret, stdout, stderr = first_host.ssh.run_command(
-            f"cd {shlex.quote(kernel_path)} && {bisect_cmd}"
+            f"cd {shlex.quote(kernel_path)} && {bisect_cmd}",
+            timeout=first_host.ssh_connect_timeout
         )
 
         if ret != 0:
@@ -940,7 +941,7 @@ class BisectMaster:
             # Check if commit exists
             ret, _stdout, stderr = host_manager.ssh.run_command(
                 f"cd {shlex.quote(kernel_path)} && git cat-file -t {commit_sha}",
-                timeout=10
+                timeout=host_manager.ssh_connect_timeout
             )
 
             if ret != 0:
