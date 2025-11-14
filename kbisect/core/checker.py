@@ -151,7 +151,7 @@ class SystemChecker:
             )
 
             # Try a simple command
-            returncode, stdout, _ = ssh.run_command('echo "kbisect-check"')
+            returncode, stdout, _ = ssh.run_command('echo "kbisect-check"', timeout=self.config.ssh_connect_timeout)
 
             if returncode == 0 and stdout.strip() == "kbisect-check":
                 results.append(CheckResult(
@@ -227,7 +227,7 @@ class SystemChecker:
             # Check remote tools
             remote_tools = ['make', 'grubby']
             for tool in remote_tools:
-                returncode, stdout, _ = ssh.run_command(f'which {tool}')
+                returncode, stdout, _ = ssh.run_command(f'which {tool}', timeout=self.config.ssh_connect_timeout)
                 if returncode == 0:
                     results.append(CheckResult(
                         category=f"Host: {hostname}",
@@ -246,7 +246,10 @@ class SystemChecker:
 
             # Check kernel path
             kernel_path = host_config.kernel_path
-            returncode, stdout, _ = ssh.run_command(f'test -d {kernel_path} && echo "exists" || echo "missing"')
+            returncode, stdout, _ = ssh.run_command(
+                f'test -d {kernel_path} && echo "exists" || echo "missing"',
+                timeout=self.config.ssh_connect_timeout
+            )
             if returncode == 0 and stdout.strip() == "exists":
                 results.append(CheckResult(
                     category=f"Host: {hostname}",

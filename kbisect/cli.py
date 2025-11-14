@@ -322,7 +322,7 @@ def _resume_session(
                 first_host_name, first_ssh, first_host_dict = ssh_clients[0]
                 kernel_path = first_host_dict.get('kernel_path', '/root/kernel')
                 mark_cmd = f"cd {kernel_path} && git bisect {mark_as}"
-                ret, _, stderr = first_ssh.run_command(mark_cmd)
+                ret, _, stderr = first_ssh.run_command(mark_cmd, timeout=first_ssh.connect_timeout)
 
                 if ret == 0:
                     print(f"✓ Commit marked as {mark_as}")

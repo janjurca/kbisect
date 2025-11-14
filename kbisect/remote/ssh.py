@@ -190,6 +190,17 @@ class SSHClient(RemoteClient):
             logger.error(f"SSH streaming command failed: {exc}")
             return -1, "", str(exc)
 
+    def is_alive(self) -> bool:
+        """Check if slave is reachable via SSH.
+
+        Uses the configured connect_timeout instead of hardcoded default.
+
+        Returns:
+            True if host is reachable, False otherwise
+        """
+        ret, _, _ = self.run_command("echo alive", timeout=self.connect_timeout)
+        return ret == 0
+
     def copy_file(self, local_path: str, remote_path: str) -> bool:
         """Copy file to slave.
 

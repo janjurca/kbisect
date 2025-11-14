@@ -78,7 +78,7 @@ timeouts:
   boot: 300                          # Boot timeout
   test: 600                          # Test timeout
   build: 1800                        # Build timeout (30 minutes)
-  ssh_connect: 15                    # SSH connection timeout (affects all SSH operations)
+  ssh_connect: 30                    # SSH timeout for connection establishment and command execution
 
 # Kernel configuration
 kernel_config:

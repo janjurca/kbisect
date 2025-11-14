@@ -553,12 +553,16 @@ class BisectMaster:
             logger.info(f"\n[{i}/{len(self.host_managers)}] Transferring to {hostname}...")
 
             # Remove existing kernel path
-            ret, _stdout, stderr = host_manager.ssh.run_command(f"rm -rf {shlex.quote(kernel_path)}")
+            ret, _stdout, stderr = host_manager.ssh.run_command(
+                f"rm -rf {shlex.quote(kernel_path)}", timeout=host_manager.ssh_connect_timeout
+            )
             if ret != 0:
                 logger.warning(f"  Failed to remove existing path (may not exist): {stderr}")
 
             # Create target directory
-            ret, _stdout, stderr = host_manager.ssh.run_command(f"mkdir -p {shlex.quote(kernel_path)}")
+            ret, _stdout, stderr = host_manager.ssh.run_command(
+                f"mkdir -p {shlex.quote(kernel_path)}", timeout=host_manager.ssh_connect_timeout
+            )
             if ret != 0:
                 logger.error(f"  Failed to create target directory: {stderr}")
                 all_success = False
@@ -583,7 +587,9 @@ class BisectMaster:
                     continue
 
                 # Verify repository exists
-                ret, _stdout, stderr = host_manager.ssh.run_command(f"test -d {shlex.quote(kernel_path)}/.git")
+                ret, _stdout, stderr = host_manager.ssh.run_command(
+                    f"test -d {shlex.quote(kernel_path)}/.git", timeout=host_manager.ssh_connect_timeout
+                )
                 if ret != 0:
                     logger.error("  Verification failed - .git directory not found")
                     all_success = False
@@ -591,14 +597,16 @@ class BisectMaster:
 
                 # Reset repository to clean state
                 ret, _stdout, stderr = host_manager.ssh.run_command(
-                    f"cd {shlex.quote(kernel_path)} && git reset --hard HEAD"
+                    f"cd {shlex.quote(kernel_path)} && git reset --hard HEAD",
+                    timeout=host_manager.ssh_connect_timeout
                 )
                 if ret != 0:
                     logger.warning(f"  Failed to reset repository: {stderr}")
 
                 # Configure git safe.directory
                 ret, _stdout, stderr = host_manager.ssh.run_command(
-                    f"git config --global --add safe.directory {shlex.quote(kernel_path)}"
+                    f"git config --global --add safe.directory {shlex.quote(kernel_path)}",
+                    timeout=host_manager.ssh_connect_timeout
                 )
                 if ret != 0:
                     logger.warning(f"  Failed to configure git safe.directory: {stderr}")
@@ -664,7 +672,8 @@ class BisectMaster:
         ret, _stdout, stderr = first_host.ssh.run_command(
             f"cd {shlex.quote(kernel_path)} && "
             f"git bisect reset >/dev/null 2>&1; "
-            f"git bisect start {shlex.quote(self.bad_commit)} {shlex.quote(self.good_commit)}"
+            f"git bisect start {shlex.quote(self.bad_commit)} {shlex.quote(self.good_commit)}",
+            timeout=first_host.ssh_connect_timeout
         )
 
         if ret != 0:
@@ -693,7 +702,9 @@ class BisectMaster:
                     remote_dir = script_info['remote_dir']
 
                     # Create remote directory
-                    ret, _stdout, stderr = hm.ssh.run_command(f"mkdir -p {shlex.quote(remote_dir)}")
+                    ret, _stdout, stderr = hm.ssh.run_command(
+                        f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout
+                    )
                     if ret != 0:
                         logger.error(f"Failed to create test script directory on {hm.config.hostname}: {stderr}")
                         return False
@@ -714,7 +725,9 @@ class BisectMaster:
                             return False
 
                         # Make script executable
-                        ret, _stdout, stderr = hm.ssh.run_command(f"chmod +x {shlex.quote(remote_path)}")
+                        ret, _stdout, stderr = hm.ssh.run_command(
+                            f"chmod +x {shlex.quote(remote_path)}", timeout=hm.ssh_connect_timeout
+                        )
                         if ret != 0:
                             logger.error(f"Failed to make test script executable on {hm.config.hostname}: {stderr}")
                             return False
@@ -756,7 +769,8 @@ class BisectMaster:
         kernel_path = first_host.config.kernel_path
 
         ret, stdout, stderr = first_host.ssh.run_command(
-            f"cd {shlex.quote(kernel_path)} && git rev-parse HEAD"
+            f"cd {shlex.quote(kernel_path)} && git rev-parse HEAD",
+            timeout=first_host.ssh_connect_timeout
         )
 
         if ret != 0:
@@ -1034,7 +1048,7 @@ class BisectMaster:
         time.sleep(DEFAULT_POST_BOOT_SETTLE_TIME)
 
         # Verify which kernel booted
-        ret, actual_kernel_ver, _ = host_manager.ssh.run_command("uname -r")
+        ret, actual_kernel_ver, _ = host_manager.ssh.run_command("uname -r", timeout=host_manager.ssh_connect_timeout)
         if ret == 0:
             actual_kernel_ver = actual_kernel_ver.strip()
             logger.info(f"  [{hostname}] Booted kernel: {actual_kernel_ver}")
@@ -1562,7 +1576,8 @@ class BisectMaster:
         first_host = self.host_managers[0]
         kernel_path = first_host.config.kernel_path
         ret, commit_msg, _ = first_host.ssh.run_command(
-            f"cd {kernel_path} && git log -1 --oneline {commit_sha}"
+            f"cd {kernel_path} && git log -1 --oneline {commit_sha}",
+            timeout=first_host.ssh_connect_timeout
         )
         commit_msg = commit_msg.strip() if ret == 0 else "Unknown"
 
@@ -1601,7 +1616,8 @@ class BisectMaster:
 
         ret, stdout, _ = first_host.ssh.run_command(
             f"cd {shlex.quote(kernel_path)} && "
-            "git bisect log | grep 'first bad commit' -A 1 | grep '^commit' | head -1 | awk '{print $2}'"
+            "git bisect log | grep 'first bad commit' -A 1 | grep '^commit' | head -1 | awk '{print $2}'",
+            timeout=first_host.ssh_connect_timeout
         )
 
         if ret == 0 and stdout.strip():
@@ -1765,7 +1781,8 @@ class BisectMaster:
         kernel_path = first_host.config.kernel_path
 
         ret, stdout, _ = first_host.ssh.run_command(
-            f"cd {shlex.quote(kernel_path)} && git bisect log | grep 'first bad commit' -A 5"
+            f"cd {shlex.quote(kernel_path)} && git bisect log | grep 'first bad commit' -A 5",
+            timeout=first_host.ssh_connect_timeout
         )
 
         if ret == 0 and stdout:
