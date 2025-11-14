@@ -92,6 +92,7 @@ class BisectConfig:
         boot_timeout: Boot timeout in seconds
         test_timeout: Test timeout in seconds
         build_timeout: Build timeout in seconds
+        ssh_connect_timeout: SSH connection timeout in seconds
         test_type: Test type (boot or custom)
         state_dir: Directory for state/metadata storage
         db_path: Path to SQLite database
@@ -115,6 +116,7 @@ class BisectConfig:
     boot_timeout: int = 300
     test_timeout: int = 600
     build_timeout: int = 1800
+    ssh_connect_timeout: int = 15
 
     # Test configuration
     test_type: str = "boot"
@@ -193,6 +195,7 @@ class HostManager:
         build_timeout: int = 1800,
         boot_timeout: int = 300,
         test_timeout: int = 600,
+        ssh_connect_timeout: int = 15,
     ) -> None:
         """Initialize host manager.
 
@@ -202,15 +205,17 @@ class HostManager:
             build_timeout: Build timeout in seconds
             boot_timeout: Boot timeout in seconds
             test_timeout: Test timeout in seconds
+            ssh_connect_timeout: SSH connection timeout in seconds
         """
         self.config = host_config
         self.host_id = host_id
         self.build_timeout = build_timeout
         self.boot_timeout = boot_timeout
         self.test_timeout = test_timeout
+        self.ssh_connect_timeout = ssh_connect_timeout
 
         # Create SSH client for this host
-        self.ssh = SSHClient(host_config.hostname, host_config.ssh_user)
+        self.ssh = SSHClient(host_config.hostname, host_config.ssh_user, ssh_connect_timeout)
 
         # Create power controller based on configured type
         self.power_controller: Optional["PowerController"] = None  # noqa: UP037
@@ -312,6 +317,7 @@ class BisectMaster:
                 build_timeout=config.build_timeout,
                 boot_timeout=config.boot_timeout,
                 test_timeout=config.test_timeout,
+                ssh_connect_timeout=config.ssh_connect_timeout,
             )
             self.host_managers.append(host_manager)
             logger.info(f"  [{host_config.hostname}] HostManager created (host_id={host_id})")
@@ -650,7 +656,7 @@ class BisectMaster:
                 "rsync",
                 "-avz",
                 "-e",
-                "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10",
+                f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout={host_manager.ssh_connect_timeout}",
                 f"{local_repo_path}/",
                 f"{ssh_user}@{hostname}:{kernel_path}/",
             ]
@@ -784,7 +790,7 @@ class BisectMaster:
                         scp_cmd = [
                             "scp",
                             "-o", "StrictHostKeyChecking=no",
-                            "-o", "ConnectTimeout=10",
+                            "-o", f"ConnectTimeout={hm.ssh_connect_timeout}",
                             local_path,
                             f"{hm.config.ssh_user}@{hm.config.hostname}:{remote_path}"
                         ]

@@ -25,16 +25,19 @@ class SSHClient(RemoteClient):
     Attributes:
         host: Slave hostname or IP
         user: SSH username
+        connect_timeout: SSH connection timeout in seconds
     """
 
-    def __init__(self, host: str, user: str = "root") -> None:
+    def __init__(self, host: str, user: str = "root", connect_timeout: int = 15) -> None:
         """Initialize SSH client.
 
         Args:
             host: Slave hostname or IP
             user: SSH username
+            connect_timeout: SSH connection timeout in seconds
         """
         super().__init__(host, user)
+        self.connect_timeout = connect_timeout
 
     def run_command(self, command: str, timeout: Optional[int] = None) -> Tuple[int, str, str]:
         """Run command on slave via SSH.
@@ -51,7 +54,7 @@ class SSHClient(RemoteClient):
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=10",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.user}@{self.host}",
             command,
         ]
@@ -123,7 +126,7 @@ class SSHClient(RemoteClient):
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=10",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.user}@{self.host}",
             command,
         ]
@@ -201,6 +204,8 @@ class SSHClient(RemoteClient):
             "scp",
             "-o",
             "StrictHostKeyChecking=no",
+            "-o",
+            f"ConnectTimeout={self.connect_timeout}",
             local_path,
             f"{self.user}@{self.host}:{remote_path}",
         ]

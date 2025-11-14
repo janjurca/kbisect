@@ -57,17 +57,20 @@ class SlaveMonitor:
     Attributes:
         slave_host: Hostname or IP address of slave machine
         slave_user: SSH username for slave access
+        connect_timeout: SSH connection timeout in seconds
     """
 
-    def __init__(self, slave_host: str, slave_user: str = "root") -> None:
+    def __init__(self, slave_host: str, slave_user: str = "root", connect_timeout: int = 15) -> None:
         """Initialize slave monitor.
 
         Args:
             slave_host: Slave hostname or IP address
             slave_user: SSH username (defaults to root)
+            connect_timeout: SSH connection timeout in seconds
         """
         self.slave_host = slave_host
         self.slave_user = slave_user
+        self.connect_timeout = connect_timeout
 
     def ping(self, timeout: int = DEFAULT_PING_TIMEOUT) -> bool:
         """Check if slave responds to ping.
@@ -104,7 +107,7 @@ class SlaveMonitor:
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=5",
+            f"ConnectTimeout={self.connect_timeout}",
             "-o",
             "BatchMode=yes",
             f"{self.slave_user}@{self.slave_host}",
@@ -136,7 +139,7 @@ class SlaveMonitor:
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=5",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.slave_user}@{self.slave_host}",
             "uname -r",
         ]
@@ -165,7 +168,7 @@ class SlaveMonitor:
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=5",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.slave_user}@{self.slave_host}",
             "uptime -p",
         ]

@@ -54,6 +54,7 @@ class SlaveDeployer:
         slave_user: str = "root",
         deploy_path: str = DEFAULT_DEPLOY_PATH,
         local_lib_path: Optional[str] = None,
+        connect_timeout: int = 15,
     ) -> None:
         """Initialize slave deployer.
 
@@ -62,11 +63,13 @@ class SlaveDeployer:
             slave_user: SSH username (defaults to root)
             deploy_path: Deployment path on slave
             local_lib_path: Local library path (auto-detected if None)
+            connect_timeout: SSH connection timeout in seconds
         """
         self.slave_host = slave_host
         self.slave_user = slave_user
         self.deploy_path = deploy_path
-        self.ssh_client = SSHClient(slave_host, slave_user)
+        self.connect_timeout = connect_timeout
+        self.ssh_client = SSHClient(slave_host, slave_user, connect_timeout)
 
         # Determine local library path
         if local_lib_path:
@@ -124,7 +127,7 @@ class SlaveDeployer:
                 "rsync",
                 "-az",  # Archive mode (preserves permissions, times, etc.) + compression
                 "-e",
-                "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10",
+                f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout={self.connect_timeout}",
                 local_path,
                 f"{self.slave_user}@{self.slave_host}:{remote_path}",
             ]

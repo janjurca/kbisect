@@ -141,6 +141,7 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
         boot_timeout=config_dict.get("timeouts", {}).get("boot", 300),
         test_timeout=config_dict.get("timeouts", {}).get("test", 600),
         build_timeout=config_dict.get("timeouts", {}).get("build", 1800),
+        ssh_connect_timeout=config_dict.get("timeouts", {}).get("ssh_connect", 15),
         test_type=config_dict.get("test", {}).get("type", "boot"),
         state_dir=config_dict.get("state_dir", "."),
         db_path=config_dict.get("database_path", "bisect.db"),
@@ -179,6 +180,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 1
 
     auto_deploy = config_dict.get("deployment", {}).get("auto_deploy", True)
+    ssh_connect_timeout = config_dict.get("timeouts", {}).get("ssh_connect", 15)
 
     # Check and deploy all hosts if needed
     print(f"Checking setup for {len(config_dict['hosts'])} host(s)...")
@@ -188,7 +190,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         deploy_path = host_dict.get("bisect_path", "/root/kernel-bisect/lib")
 
         print(f"\n[{i}/{len(config_dict['hosts'])}] Checking host: {host_name}")
-        deployer = SlaveDeployer(host_name, host_user, deploy_path)
+        deployer = SlaveDeployer(host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout)
 
         if not deployer.is_deployed():
             if auto_deploy or args.force_deploy:
@@ -275,12 +277,13 @@ def _resume_session(
 
     from kbisect.remote import SSHClient
 
+    ssh_connect_timeout = config_dict.get("timeouts", {}).get("ssh_connect", 15)
     all_reachable = True
     ssh_clients = []
     for host_dict in config_dict["hosts"]:
         host_name = host_dict["hostname"]
         host_user = host_dict.get("ssh_user", "root")
-        ssh = SSHClient(host_name, host_user)
+        ssh = SSHClient(host_name, host_user, ssh_connect_timeout)
         ssh_clients.append((host_name, ssh, host_dict))
 
         if not ssh.is_alive():
@@ -496,9 +499,10 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
     # Create monitors for all hosts
     monitors = []
+    ssh_connect_timeout = config_dict.get("timeouts", {}).get("ssh_connect", 15)
     for host_dict in config_dict["hosts"]:
         monitor = SlaveMonitor(
-            host_dict["hostname"], host_dict.get("ssh_user", "root")
+            host_dict["hostname"], host_dict.get("ssh_user", "root"), ssh_connect_timeout
         )
         monitors.append((host_dict["hostname"], monitor))
 
@@ -959,6 +963,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     print(f"Deploying to {len(config_dict['hosts'])} host(s)...\n")
 
+    ssh_connect_timeout = config_dict.get("timeouts", {}).get("ssh_connect", 15)
     all_success = True
     for i, host_dict in enumerate(config_dict["hosts"], 1):
         host_name = host_dict["hostname"]
@@ -967,7 +972,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         print(f"[{i}/{len(config_dict['hosts'])}] Host: {host_name}")
 
-        deployer = SlaveDeployer(host_name, host_user, deploy_path)
+        deployer = SlaveDeployer(host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout)
 
         if args.verify_only:
             # Just verify deployment
