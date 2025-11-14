@@ -47,13 +47,15 @@ class BeakerController(PowerController):
         hostname: System hostname/FQDN to control
     """
 
-    def __init__(self, hostname: str) -> None:
+    def __init__(self, hostname: str, ssh_connect_timeout: int = 15) -> None:
         """Initialize Beaker controller.
 
         Args:
             hostname: System hostname or FQDN to control
+            ssh_connect_timeout: SSH connection timeout in seconds
         """
         self.hostname = hostname
+        self.ssh_connect_timeout = ssh_connect_timeout
 
     def _run_beaker_command(self, action: str, timeout: int = DEFAULT_BEAKER_TIMEOUT) -> Tuple[int, str, str]:
         """Run bkr system-power command.
@@ -189,7 +191,7 @@ class BeakerController(PowerController):
         logger.info(f"Resetting system {self.hostname} via Beaker...")
 
         # Create temporary SSH client for shutdown verification
-        ssh_client = SSHClient(self.hostname, user="root", connect_timeout=20)
+        ssh_client = SSHClient(self.hostname, user="root", connect_timeout=self.ssh_connect_timeout)
 
         # Pre-reboot connectivity check
         logger.info("Verifying SSH connectivity before reboot...")

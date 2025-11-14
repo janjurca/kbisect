@@ -148,7 +148,7 @@ class HostManager:
         elif host_config.power_control_type == "beaker":
             from kbisect.power import BeakerController
 
-            self.power_controller = BeakerController(host_config.hostname)
+            self.power_controller = BeakerController(host_config.hostname, ssh_connect_timeout)
 
         # Console collector (created per boot cycle)
         self.console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
@@ -364,7 +364,7 @@ class BisectMaster:
             logger.debug(f"  Collecting from {hostname}...")
 
             # Call bash function to collect metadata
-            ret, stdout, stderr = host_manager.ssh.call_function("collect_metadata", collection_type, timeout=30)
+            ret, stdout, stderr = host_manager.ssh.call_function("collect_metadata", collection_type, timeout=host_manager.ssh_connect_timeout)
 
             if ret != 0:
                 logger.warning(f"  Failed to collect {collection_type} metadata from {hostname}: {stderr}")
@@ -440,7 +440,7 @@ class BisectMaster:
             config_path = f"{kernel_path}/.config"
 
             # Download config file content from host (to memory, not disk)
-            ret, stdout, stderr = hm.ssh.run_command(f"cat {config_path}", timeout=30)
+            ret, stdout, stderr = hm.ssh.run_command(f"cat {config_path}", timeout=hm.ssh_connect_timeout)
 
             if ret != 0:
                 logger.warning(f"  [{hostname}] Failed to read kernel config: {stderr}")
@@ -793,7 +793,7 @@ class BisectMaster:
                             local_path,
                             f"{hm.config.ssh_user}@{hm.config.hostname}:{remote_path}"
                         ]
-                        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30, check=False)
+                        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=hm.ssh_connect_timeout, check=False)
 
                         if result.returncode != 0:
                             logger.error(f"Failed to transfer test script to {hm.config.hostname}: {result.stderr}")
@@ -843,7 +843,7 @@ class BisectMaster:
                             local_path,
                             f"{hm.config.ssh_user}@{hm.config.hostname}:{remote_path}"
                         ]
-                        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30, check=False)
+                        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=hm.ssh_connect_timeout, check=False)
 
                         if result.returncode != 0:
                             logger.error(f"Failed to transfer kernel config to {hm.config.hostname}: {result.stderr}")
