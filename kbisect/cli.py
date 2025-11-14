@@ -138,6 +138,7 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
             kernel_path=host_dict.get("kernel_path", "/root/kernel"),
             bisect_path=host_dict.get("bisect_path", "/root/kernel-bisect/lib"),
             test_script=host_dict.get("test_script", "test.sh"),
+            kernel_config_file=host_dict.get("kernel_config_file"),
             power_control_type=host_dict.get("power_control_type", "ipmi"),
             ipmi_host=host_dict.get("ipmi_host"),
             ipmi_user=host_dict.get("ipmi_user"),

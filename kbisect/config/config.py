@@ -18,6 +18,7 @@ class HostConfig:
         kernel_path: Path to kernel source directory on host
         bisect_path: Path to bisect library on host
         test_script: Path to test script for this host (role-specific)
+        kernel_config_file: Path to kernel config file for this host (optional)
         power_control_type: Power control method ("ipmi", "beaker", or None for SSH fallback)
         ipmi_host: Optional IPMI interface hostname or IP
         ipmi_user: Optional IPMI username
@@ -29,6 +30,7 @@ class HostConfig:
     kernel_path: str = "/root/kernel"
     bisect_path: str = "/root/kernel-bisect/lib"
     test_script: str = "test.sh"
+    kernel_config_file: Optional[str] = None
     power_control_type: Optional[str] = "ipmi"
     ipmi_host: Optional[str] = None
     ipmi_user: Optional[str] = None

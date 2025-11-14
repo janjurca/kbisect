@@ -930,9 +930,11 @@ class BisectMaster:
         hostname = host_manager.config.hostname
         logger.info(f"  [{hostname}] Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}...")
 
-        # Determine kernel config source
+        # Determine kernel config source (use per-host config if set, otherwise fall back to global)
         kernel_config = ""
-        if self.config.kernel_config_file:
+        if host_manager.config.kernel_config_file:
+            kernel_config = host_manager.config.kernel_config_file
+        elif self.config.kernel_config_file:
             kernel_config = self.config.kernel_config_file
 
         # Create initial log entry with header
