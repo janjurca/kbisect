@@ -83,12 +83,8 @@ timeouts:
 # Kernel configuration
 kernel_config:
   # Path to base .config file (optional)
-  # If not specified and use_running_config is false, kernel defaults are used
+  # If not specified, kernel defaults are used
   config_file: null
-
-  # Use running kernel's config as base (default: false)
-  # If both config_file and use_running_config are set, config_file takes precedence
-  use_running_config: false
 
 # Test configuration
 # Note: Current kernel is always protected and cannot be deleted during cleanup

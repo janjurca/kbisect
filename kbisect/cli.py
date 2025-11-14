@@ -105,7 +105,6 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
     """
     # Get kernel config settings from config file only
     kernel_config_file = config_dict.get("kernel_config", {}).get("config_file")
-    use_running_config = config_dict.get("kernel_config", {}).get("use_running_config", False)
 
     # Get metadata settings from config
     metadata_config = config_dict.get("metadata", {})
@@ -158,7 +157,6 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
         state_dir=config_dict.get("state_dir", "."),
         db_path=config_dict.get("database_path", "bisect.db"),
         kernel_config_file=kernel_config_file,
-        use_running_config=use_running_config,
         collect_baseline=metadata_config.get("collect_baseline", True),
         collect_per_iteration=metadata_config.get("collect_per_iteration", True),
         collect_kernel_config=metadata_config.get("collect_kernel_config", True),

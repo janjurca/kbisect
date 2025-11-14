@@ -402,15 +402,7 @@ build_kernel() {
 
     # Copy base kernel config if specified
     if [ -n "$kernel_config" ]; then
-        if [ "$kernel_config" = "RUNNING" ]; then
-            local running_config="/boot/config-$(uname -r)"
-            if [ -f "$running_config" ]; then
-                echo "Using running kernel config: $running_config" >&2
-                cp "$running_config" .config
-            else
-                echo "Warning: Running kernel config not found: $running_config" >&2
-            fi
-        elif [ -f "$kernel_config" ]; then
+        if [ -f "$kernel_config" ]; then
             echo "Using kernel config: $kernel_config" >&2
             cp "$kernel_config" .config
         else

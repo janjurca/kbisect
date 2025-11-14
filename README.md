@@ -357,15 +357,7 @@ EOF
 kbisect start
 ```
 
-**Option 2: Use running kernel's config automatically**
-
-```yaml
-# bisect.yaml
-kernel_config:
-  use_running_config: true  # Uses /boot/config-$(uname -r) from slave
-```
-
-**Option 3: Relative path in config file**
+**Option 2: Relative path in config file**
 
 ```yaml
 # bisect.yaml (in your bisection directory)
@@ -607,13 +599,8 @@ kernel_config:
   # Path to base .config file on master machine (optional)
   # Can be absolute or relative to config file location
   # File will be automatically transferred to slave during initialization
-  # If not specified and use_running_config is false, kernel defaults are used
+  # If not specified, kernel defaults are used
   config_file: null
-
-  # Use running kernel's config as base (default: false)
-  # Uses /boot/config-$(uname -r) from slave machine
-  # If both config_file and use_running_config are set, config_file takes precedence
-  use_running_config: false
 
 # Kernel protection
 protection:

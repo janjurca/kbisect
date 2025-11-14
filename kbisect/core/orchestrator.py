@@ -269,8 +269,8 @@ class BisectMaster:
         self._local_kernel_configs = {}  # Store mapping of host_id -> local_config_path for transfer
         for host_manager in self.host_managers:
             kernel_config_file = host_manager.config.kernel_config_file
-            # Only process if kernel_config_file is set and use_running_config is not enabled
-            if kernel_config_file and not host_manager.config.use_running_config:
+            # Only process if kernel_config_file is set
+            if kernel_config_file:
                 config_path = Path(kernel_config_file)
                 if config_path.exists():
                     # It's a local file on master - need to transfer it
@@ -934,8 +934,6 @@ class BisectMaster:
         kernel_config = ""
         if self.config.kernel_config_file:
             kernel_config = self.config.kernel_config_file
-        elif self.config.use_running_config:
-            kernel_config = "RUNNING"
 
         # Create initial log entry with header
         log_header = f"=== Build Kernel on {hostname}: {commit_sha[:SHORT_COMMIT_LENGTH]} ===\n"

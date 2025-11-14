@@ -49,7 +49,6 @@ class BisectConfig:
         state_dir: Directory for state/metadata storage
         db_path: Path to SQLite database
         kernel_config_file: Path to kernel config file (optional)
-        use_running_config: Use running kernel config as base
         collect_baseline: Collect baseline system metadata
         collect_per_iteration: Collect metadata per iteration
         collect_kernel_config: Collect kernel .config files
@@ -79,7 +78,6 @@ class BisectConfig:
 
     # Kernel configuration
     kernel_config_file: Optional[str] = None
-    use_running_config: bool = False
 
     # Metadata collection
     collect_baseline: bool = True
