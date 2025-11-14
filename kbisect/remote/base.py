@@ -8,6 +8,10 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple
 
 
+# Constants
+SSH_ALIVE_TIMEOUT = 15  # Timeout in seconds for is_alive() check
+
+
 class RemoteConnectionError(Exception):
     """Base exception for remote connection errors."""
 
@@ -57,7 +61,7 @@ class RemoteClient(ABC):
         Returns:
             True if host is reachable, False otherwise
         """
-        ret, _, _ = self.run_command("echo alive", timeout=15)
+        ret, _, _ = self.run_command("echo alive", timeout=SSH_ALIVE_TIMEOUT)
         return ret == 0
 
     @abstractmethod

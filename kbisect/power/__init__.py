@@ -6,6 +6,12 @@ from kbisect.power.base import (
     PowerControlError,
     PowerState,
 )
+from kbisect.power.beaker import (
+    BeakerCommandError,
+    BeakerController,
+    BeakerError,
+    BeakerTimeoutError,
+)
 from kbisect.power.ipmi import (
     IPMICommandError,
     IPMIController,
@@ -19,6 +25,11 @@ __all__ = [
     "PowerState",
     "BootDevice",
     "PowerControlError",
+    # Beaker implementation
+    "BeakerController",
+    "BeakerError",
+    "BeakerTimeoutError",
+    "BeakerCommandError",
     # IPMI implementation
     "IPMIController",
     "IPMIError",

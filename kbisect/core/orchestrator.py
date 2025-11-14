@@ -66,6 +66,7 @@ class HostConfig:
         kernel_path: Path to kernel source directory on host
         bisect_path: Path to bisect library on host
         test_script: Path to test script for this host (role-specific)
+        power_control_type: Power control method ("ipmi", "beaker", or None for SSH fallback)
         ipmi_host: Optional IPMI interface hostname or IP
         ipmi_user: Optional IPMI username
         ipmi_password: Optional IPMI password
@@ -76,6 +77,7 @@ class HostConfig:
     kernel_path: str = "/root/kernel"
     bisect_path: str = "/root/kernel-bisect/lib"
     test_script: str = "test.sh"
+    power_control_type: Optional[str] = "ipmi"
     ipmi_host: Optional[str] = None
     ipmi_user: Optional[str] = None
     ipmi_password: Optional[str] = None
@@ -174,13 +176,13 @@ class HostManager:
     """Manages a single host in multi-host bisection.
 
     Encapsulates per-host resources and operations including SSH client,
-    IPMI controller, and console collector.
+    power controller, and console collector.
 
     Attributes:
         config: Host configuration
         host_id: Database host ID
         ssh: SSH client for this host
-        ipmi_controller: IPMI controller for this host (optional)
+        power_controller: Power controller for this host (optional)
         console_collector: Console log collector for this host (optional)
     """
 
@@ -210,20 +212,25 @@ class HostManager:
         # Create SSH client for this host
         self.ssh = SSHClient(host_config.hostname, host_config.ssh_user)
 
-        # Create IPMI controller if configured for this host
-        self.ipmi_controller: Optional["IPMIController"] = None  # noqa: UP037
-        if (
-            host_config.ipmi_host
-            and host_config.ipmi_user
-            and host_config.ipmi_password
-        ):
-            from kbisect.power import IPMIController
+        # Create power controller based on configured type
+        self.power_controller: Optional["PowerController"] = None  # noqa: UP037
+        if host_config.power_control_type == "ipmi":
+            if (
+                host_config.ipmi_host
+                and host_config.ipmi_user
+                and host_config.ipmi_password
+            ):
+                from kbisect.power import IPMIController
 
-            self.ipmi_controller = IPMIController(
-                host_config.ipmi_host,
-                host_config.ipmi_user,
-                host_config.ipmi_password,
-            )
+                self.power_controller = IPMIController(
+                    host_config.ipmi_host,
+                    host_config.ipmi_user,
+                    host_config.ipmi_password,
+                )
+        elif host_config.power_control_type == "beaker":
+            from kbisect.power import BeakerController
+
+            self.power_controller = BeakerController(host_config.hostname)
 
         # Console collector (created per boot cycle)
         self.console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
@@ -292,6 +299,7 @@ class BisectMaster:
                 kernel_path=host_config.kernel_path,
                 bisect_path=host_config.bisect_path,
                 test_script=host_config.test_script,
+                power_control_type=host_config.power_control_type,
                 ipmi_host=host_config.ipmi_host,
                 ipmi_user=host_config.ipmi_user,
                 ipmi_password=host_config.ipmi_password,
@@ -308,45 +316,35 @@ class BisectMaster:
             self.host_managers.append(host_manager)
             logger.info(f"  [{host_config.hostname}] HostManager created (host_id={host_id})")
 
-        # Set ssh and ipmi_controller to first host for convenience in some methods
+        # Set ssh and power_controller to first host for convenience in some methods
         self.ssh = self.host_managers[0].ssh
-        self.ipmi_controller = self.host_managers[0].ipmi_controller
+        self.power_controller = self.host_managers[0].power_controller
 
-        # Console collector (created per boot cycle)
-        self.active_console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
-
-        # Resolve test script paths for each host and copy local scripts to remote
+        # Resolve test script paths for each host and store local paths for transfer
+        self._local_test_scripts = {}  # Store mapping of host_id -> local_script_path for transfer
         for host_manager in self.host_managers:
             test_script = host_manager.config.test_script
             if test_script:
                 script_path = Path(test_script)
                 if script_path.exists():
-                    # It's a local file on master - copy to remote and update path
+                    # It's a local file on master - need to transfer it
                     logger.debug(f"Test script is local file on master: {test_script}")
                     bisect_base_dir = Path(host_manager.config.bisect_path).parent
                     remote_script_dir = bisect_base_dir / "test-scripts"
                     remote_script_path = str(remote_script_dir / script_path.name)
 
-                    # Create remote test-scripts directory
-                    logger.info(f"Creating test-scripts directory on {host_manager.config.hostname}...")
-                    ret, _, stderr = host_manager.ssh.run_command(f"mkdir -p {remote_script_dir}")
-                    if ret != 0:
-                        logger.error(f"Failed to create test-scripts directory: {stderr}")
-                        raise RuntimeError(f"Failed to create test-scripts directory on {host_manager.config.hostname}")
-
-                    # Copy test script to remote host
-                    logger.info(f"Copying test script to {host_manager.config.hostname}:{remote_script_path}...")
-                    if not host_manager.ssh.copy_file(str(script_path), remote_script_path):
-                        raise RuntimeError(f"Failed to copy test script to {host_manager.config.hostname}")
-
-                    # Make test script executable
-                    ret, _, stderr = host_manager.ssh.run_command(f"chmod +x {remote_script_path}")
-                    if ret != 0:
-                        logger.warning(f"Failed to make test script executable: {stderr}")
+                    # Store local path for transfer during initialization
+                    self._local_test_scripts[host_manager.host_id] = {
+                        'local_path': str(script_path),
+                        'remote_path': remote_script_path,
+                        'remote_dir': str(remote_script_dir)
+                    }
 
                     # Update config to use remote path
                     host_manager.config.test_script = remote_script_path
-                    logger.info(f"✓ Test script deployed to {host_manager.config.hostname}:{remote_script_path}")
+                    logger.debug(f"Resolved test script to slave path: {remote_script_path}")
+                else:
+                    logger.debug(f"Test script assumed to exist on remote host: {test_script}")
 
     def create_iteration_metadata_record(self, iteration_id: int) -> Optional[int]:
         """Create a minimal metadata record for an iteration.
@@ -378,7 +376,7 @@ class BisectMaster:
             return None
 
     def collect_and_store_metadata(self, collection_type: str, iteration_id: Optional[int] = None) -> bool:
-        """Collect metadata from slave and store in database.
+        """Collect metadata from all hosts and store in database.
 
         If a placeholder metadata record already exists for this iteration,
         it will be updated with the full metadata instead of creating a new record.
@@ -388,24 +386,49 @@ class BisectMaster:
             iteration_id: Optional iteration ID
 
         Returns:
-            True if metadata collected successfully, False otherwise
+            True if metadata collected successfully from all hosts, False otherwise
         """
-        logger.debug(f"Collecting {collection_type} metadata...")
+        logger.debug(f"Collecting {collection_type} metadata from {len(self.host_managers)} host(s)...")
 
-        # Call bash function to collect metadata
-        ret, stdout, stderr = self.ssh.call_function("collect_metadata", collection_type, timeout=30)
+        # Collect metadata from all hosts
+        all_host_metadata = {}
+        success_count = 0
 
-        if ret != 0:
-            logger.warning(f"Failed to collect {collection_type} metadata: {stderr}")
+        for host_manager in self.host_managers:
+            hostname = host_manager.config.hostname
+            logger.debug(f"  Collecting from {hostname}...")
+
+            # Call bash function to collect metadata
+            ret, stdout, stderr = host_manager.ssh.call_function("collect_metadata", collection_type, timeout=30)
+
+            if ret != 0:
+                logger.warning(f"  Failed to collect {collection_type} metadata from {hostname}: {stderr}")
+                all_host_metadata[hostname] = {"error": stderr, "status": "failed"}
+                continue
+
+            # Parse JSON response
+            try:
+                metadata_dict = json.loads(stdout)
+                all_host_metadata[hostname] = metadata_dict
+                success_count += 1
+            except json.JSONDecodeError as exc:
+                logger.warning(f"  Invalid JSON from {hostname} metadata collection: {exc}")
+                logger.debug(f"  Raw output: {stdout}")
+                all_host_metadata[hostname] = {"error": str(exc), "status": "parse_failed"}
+
+        if success_count == 0:
+            logger.warning(f"Failed to collect {collection_type} metadata from any host")
             return False
 
-        # Parse JSON response
-        try:
-            metadata_dict = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            logger.warning(f"Invalid JSON from metadata collection: {exc}")
-            logger.debug(f"Raw output: {stdout}")
-            return False
+        logger.debug(f"  ✓ Collected metadata from {success_count}/{len(self.host_managers)} host(s)")
+
+        # Create multihost metadata structure
+        multihost_metadata = {
+            "collection_type": collection_type,
+            "host_count": len(self.host_managers),
+            "success_count": success_count,
+            "hosts": all_host_metadata
+        }
 
         # Check if a placeholder metadata record already exists for this iteration
         if iteration_id:
@@ -416,18 +439,18 @@ class BisectMaster:
                 if iteration_metadata:
                     # Update existing placeholder record instead of creating new one
                     metadata_id = iteration_metadata[0]["metadata_id"]
-                    self.state.update_metadata(metadata_id, metadata_dict)
+                    self.state.update_metadata(metadata_id, multihost_metadata)
                     logger.debug(f"✓ Updated existing {collection_type} metadata record (id: {metadata_id})")
                     return True
 
         # No existing record found - create new one
-        self.state.store_metadata(self.session_id, metadata_dict, iteration_id, host_id=self.host_managers[0].host_id)
-        logger.debug(f"✓ Stored {collection_type} metadata")
+        self.state.store_metadata(self.session_id, multihost_metadata, iteration_id)
+        logger.debug(f"✓ Stored {collection_type} metadata for all hosts")
 
         return True
 
-    def capture_kernel_config(self, kernel_version: str, iteration_id: int) -> bool:
-        """Capture and store kernel config file from slave in database.
+    def capture_kernel_config(self, kernel_version: str, iteration_id: int, host_manager: Optional[HostManager] = None) -> bool:
+        """Capture and store kernel config file(s) from host(s) in database.
 
         Reads the .config file from the kernel build directory (KERNEL_PATH/.config)
         instead of /boot, ensuring the file exists at collection time.
@@ -435,41 +458,71 @@ class BisectMaster:
         Args:
             kernel_version: Kernel version string (for logging purposes)
             iteration_id: Iteration ID for linking config file
+            host_manager: Optional specific host manager. If None, captures from all hosts.
 
         Returns:
-            True if config captured successfully, False otherwise
+            True if config captured successfully from all/specified host(s), False otherwise
         """
-        # Read .config from kernel build directory
-        # Use ${KERNEL_PATH} environment variable, which defaults to /root/kernel
-        config_path = "${KERNEL_PATH:=/root/kernel}/.config"
+        # Determine which hosts to capture from
+        hosts_to_capture = [host_manager] if host_manager else self.host_managers
 
-        # Download config file content from slave (to memory, not disk)
-        ret, stdout, stderr = self.ssh.run_command(f"cat {config_path}", timeout=30)
+        success_count = 0
+        all_configs = {}
 
-        if ret != 0:
-            logger.warning(f"Failed to read kernel config from slave: {stderr}")
+        for hm in hosts_to_capture:
+            hostname = hm.config.hostname
+            kernel_path = hm.config.kernel_path
+            config_path = f"{kernel_path}/.config"
+
+            # Download config file content from host (to memory, not disk)
+            ret, stdout, stderr = hm.ssh.run_command(f"cat {config_path}", timeout=30)
+
+            if ret != 0:
+                logger.warning(f"  [{hostname}] Failed to read kernel config: {stderr}")
+                all_configs[hostname] = {"error": stderr, "status": "failed"}
+                continue
+
+            if not stdout:
+                logger.warning(f"  [{hostname}] Kernel config file is empty: {config_path}")
+                all_configs[hostname] = {"error": "Config file empty", "status": "empty"}
+                continue
+
+            # Store config content for this host
+            all_configs[hostname] = {
+                "content": stdout,
+                "kernel_version": kernel_version,
+                "config_path": config_path,
+                "status": "success"
+            }
+            success_count += 1
+
+        if success_count == 0:
+            logger.warning(f"Failed to capture kernel config from any host")
             return False
 
-        if not stdout:
-            logger.warning(f"Kernel config file is empty: {config_path}")
-            return False
-
-        # Store config content as metadata record with collection_type='file'
+        # Store combined config content as metadata record with collection_type='file'
         try:
-            # Store content as text in metadata JSON
-            config_content = stdout  # Already decoded as text
+            # Create multihost config structure
+            multihost_config = {
+                "file_type": "kernel_config",
+                "kernel_version": kernel_version,
+                "host_count": len(hosts_to_capture),
+                "success_count": success_count,
+                "hosts": all_configs
+            }
+
+            # Store as file metadata
             metadata_id = self.state.store_file_metadata(
                 session_id=self.session_id,
                 iteration_id=iteration_id,
-                file_type="kernel_config",
-                file_content=config_content,
-                host_id=self.host_managers[0].host_id,
+                file_type="kernel_config_multihost",
+                file_content=json.dumps(multihost_config, indent=2),
                 kernel_version=kernel_version,
             )
-            logger.info(f"✓ Captured kernel config from build directory in DB (metadata_id: {metadata_id})")
+            logger.info(f"✓ Captured kernel configs from {success_count}/{len(hosts_to_capture)} host(s) (metadata_id: {metadata_id})")
             return True
         except Exception as exc:
-            logger.error(f"Failed to store kernel config in database: {exc}")
+            logger.error(f"Failed to store kernel configs in database: {exc}")
             return False
 
     def _prepare_kernel_repo(self) -> Optional[str]:
@@ -710,6 +763,52 @@ class BisectMaster:
                 return False
             logger.info(f"  ✓ {hm.config.hostname}")
 
+        # Transfer test scripts if they're local files
+        if self._local_test_scripts:
+            logger.info("Transferring test scripts to hosts...")
+            for hm in self.host_managers:
+                if hm.host_id in self._local_test_scripts:
+                    script_info = self._local_test_scripts[hm.host_id]
+                    local_path = script_info['local_path']
+                    remote_path = script_info['remote_path']
+                    remote_dir = script_info['remote_dir']
+
+                    # Create remote directory
+                    ret, _stdout, stderr = hm.ssh.run_command(f"mkdir -p {shlex.quote(remote_dir)}")
+                    if ret != 0:
+                        logger.error(f"Failed to create test script directory on {hm.config.hostname}: {stderr}")
+                        return False
+
+                    # Transfer script using SCP via subprocess
+                    try:
+                        scp_cmd = [
+                            "scp",
+                            "-o", "StrictHostKeyChecking=no",
+                            "-o", "ConnectTimeout=10",
+                            local_path,
+                            f"{hm.config.ssh_user}@{hm.config.hostname}:{remote_path}"
+                        ]
+                        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30, check=False)
+
+                        if result.returncode != 0:
+                            logger.error(f"Failed to transfer test script to {hm.config.hostname}: {result.stderr}")
+                            return False
+
+                        # Make script executable
+                        ret, _stdout, stderr = hm.ssh.run_command(f"chmod +x {shlex.quote(remote_path)}")
+                        if ret != 0:
+                            logger.error(f"Failed to make test script executable on {hm.config.hostname}: {stderr}")
+                            return False
+
+                        logger.info(f"  ✓ Transferred test script to {hm.config.hostname}: {remote_path}")
+
+                    except subprocess.TimeoutExpired:
+                        logger.error(f"Test script transfer to {hm.config.hostname} timed out")
+                        return False
+                    except Exception as exc:
+                        logger.error(f"Error transferring test script to {hm.config.hostname}: {exc}")
+                        return False
+
         # Collect baseline metadata if enabled (use first host)
         if self.config.collect_baseline:
             logger.info("Collecting baseline system metadata...")
@@ -717,8 +816,6 @@ class BisectMaster:
                 logger.info("✓ Baseline metadata collected")
             else:
                 logger.warning("Failed to collect baseline metadata (non-fatal)")
-
-        # Test scripts are already transferred and resolved in __init__
 
         self.save_state()
         logger.info("=== Initialization Complete ===")
@@ -906,6 +1003,35 @@ class BisectMaster:
         logger.info(f"  [{hostname}] Build OK in {elapsed // 60}m {elapsed % 60}s")
         return True, ret, log_id, built_kernel_ver
 
+    def _validate_commit_on_all_hosts(self, commit_sha: str) -> Tuple[bool, List[str]]:
+        """Validate that a commit exists on all hosts.
+
+        Args:
+            commit_sha: Commit SHA to validate
+
+        Returns:
+            Tuple of (all_valid, list_of_hosts_missing_commit)
+        """
+        missing_hosts = []
+
+        for host_manager in self.host_managers:
+            hostname = host_manager.config.hostname
+            kernel_path = host_manager.config.kernel_path
+
+            # Check if commit exists
+            ret, _stdout, stderr = host_manager.ssh.run_command(
+                f"cd {shlex.quote(kernel_path)} && git cat-file -t {commit_sha}",
+                timeout=10
+            )
+
+            if ret != 0:
+                logger.warning(f"  [{hostname}] Commit {commit_sha[:7]} not found: {stderr}")
+                missing_hosts.append(hostname)
+            else:
+                logger.debug(f"  [{hostname}] Commit {commit_sha[:7]} exists")
+
+        return (len(missing_hosts) == 0, missing_hosts)
+
     def _reboot_host(
         self,
         host_manager: HostManager,
@@ -925,8 +1051,16 @@ class BisectMaster:
         hostname = host_manager.config.hostname
         logger.info(f"  [{hostname}] Rebooting...")
 
-        # Send reboot command
-        host_manager.ssh.run_command("reboot", timeout=5)
+        # Use power controller if available, otherwise fall back to SSH reboot
+        if host_manager.power_controller:
+            logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
+            if not host_manager.power_controller.reset():
+                logger.error(f"  [{hostname}] Power controller reset failed")
+                return False, None
+        else:
+            logger.info(f"  [{hostname}] Using SSH reboot command")
+            # Send reboot command via SSH
+            host_manager.ssh.run_command("reboot", timeout=5)
 
         # Wait for reboot to start
         time.sleep(DEFAULT_REBOOT_SETTLE_TIME)
@@ -1043,6 +1177,334 @@ class BisectMaster:
     # End of Per-Host Helper Methods
     # ===========================================================================
 
+    # ===========================================================================
+    # Phase Extraction Methods
+    # ===========================================================================
+
+    def _validate_commit_phase(
+        self, commit_sha: str, iteration: "BisectIteration"
+    ) -> Tuple[bool, bool]:
+        """Phase 0: Validate commit exists on all hosts.
+
+        Args:
+            commit_sha: Commit SHA to validate
+            iteration: Iteration object to update on failure
+
+        Returns:
+            Tuple of (phase_succeeded, bisection_complete)
+        """
+        logger.debug(f"Validating commit {commit_sha[:7]} exists on all hosts...")
+        all_valid, missing_hosts = self._validate_commit_on_all_hosts(commit_sha)
+
+        if not all_valid:
+            logger.error(f"Commit {commit_sha[:7]} not found on hosts: {', '.join(missing_hosts)}")
+            iteration.result = TestResult.SKIP
+            iteration.error = f"Commit not found on hosts: {', '.join(missing_hosts)}"
+
+            # Mark commit as skip in git bisect
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+            if not success:
+                logger.error("Failed to mark commit as SKIP in git bisect")
+
+            return (False, bisection_complete)
+
+        logger.debug(f"✓ Commit {commit_sha[:7]} exists on all hosts")
+        return (True, False)
+
+    def _build_phase(
+        self, commit_sha: str, iteration_id: int, iteration: "BisectIteration"
+    ) -> Tuple[bool, dict, bool]:
+        """Phase 1: Build kernel on all hosts in parallel.
+
+        Args:
+            commit_sha: Commit SHA to build
+            iteration_id: Database iteration ID
+            iteration: Iteration object to update on failure
+
+        Returns:
+            Tuple of (phase_succeeded, build_results dict, bisection_complete)
+        """
+        iteration.state = BisectState.BUILDING
+        logger.info(f"Building kernel on {len(self.host_managers)} hosts...")
+
+        build_results = {}
+        # Add 10% buffer to configured timeout for parallel execution overhead
+        overall_timeout = self.config.build_timeout * 1.1
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._build_on_host,
+                    host_manager,
+                    commit_sha,
+                    iteration_id
+                ): host_manager
+                for host_manager in self.host_managers
+            }
+
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    host_manager = futures[future]
+                    try:
+                        success, exit_code, log_id, kernel_ver = future.result()
+                        build_results[host_manager.host_id] = {
+                            'success': success,
+                            'kernel_ver': kernel_ver,
+                            'exit_code': exit_code,
+                            'log_id': log_id
+                        }
+                    except Exception as e:
+                        logger.error(f"  [{host_manager.config.hostname}] Build exception: {e}")
+                        build_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': str(e)
+                        }
+            except TimeoutError:
+                logger.error(f"Build phase timed out after {overall_timeout}s")
+                # Mark any hosts without results as timed out
+                for host_manager in self.host_managers:
+                    if host_manager.host_id not in build_results:
+                        logger.error(f"  [{host_manager.config.hostname}] Build timed out")
+                        build_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': f'Build timed out after {overall_timeout}s'
+                        }
+
+        # Check if any build failed
+        if not all(r.get('success', False) for r in build_results.values()):
+            logger.error("One or more hosts failed to build - marking iteration SKIP")
+            iteration.result = TestResult.SKIP
+            iteration.error = "Build failed on one or more hosts"
+
+            # Prepare bulk results for all hosts
+            bulk_results = []
+            for host_manager in self.host_managers:
+                result_data = build_results.get(host_manager.host_id, {})
+                # Ensure error message is populated even if build failed without exception
+                error_msg = result_data.get('error')
+                if not error_msg and not result_data.get('success'):
+                    error_msg = f"Build failed with exit code {result_data.get('exit_code', 'unknown')}"
+
+                bulk_results.append({
+                    'iteration_id': iteration_id,
+                    'host_id': host_manager.host_id,
+                    'build_result': "failure" if not result_data.get('success') else "success",
+                    'final_result': "skip",
+                    'error_message': error_msg
+                })
+
+            # Store all results in a single transaction
+            self.state.create_iteration_results_bulk(bulk_results)
+
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+            if not success:
+                logger.error("Failed to mark commit as SKIP in git bisect")
+
+            return (False, build_results, bisection_complete)
+
+        logger.info("✓ All hosts built successfully")
+        return (True, build_results, False)
+
+    def _reboot_phase(
+        self, iteration_id: int, build_results: dict, commit_sha: str, iteration: "BisectIteration"
+    ) -> Tuple[bool, dict, bool]:
+        """Phase 2: Reboot all hosts in parallel.
+
+        Args:
+            iteration_id: Database iteration ID
+            build_results: Results from build phase (contains kernel versions)
+            commit_sha: Commit SHA being tested
+            iteration: Iteration object to update on failure
+
+        Returns:
+            Tuple of (phase_succeeded, reboot_results dict, bisection_complete)
+        """
+        iteration.state = BisectState.REBOOTING
+        logger.info(f"Rebooting {len(self.host_managers)} hosts...")
+
+        reboot_results = {}
+        # Add 10% buffer to configured timeout for parallel execution overhead
+        overall_timeout = self.config.boot_timeout * 1.1
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._reboot_host,
+                    host_manager,
+                    iteration_id,
+                    build_results[host_manager.host_id].get('kernel_ver')  # Use .get() to handle missing key
+                ): host_manager
+                for host_manager in self.host_managers
+            }
+
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    host_manager = futures[future]
+                    try:
+                        success, actual_kernel_ver = future.result()
+                        reboot_results[host_manager.host_id] = {
+                            'success': success,
+                            'actual_kernel_ver': actual_kernel_ver
+                        }
+                    except Exception as e:
+                        logger.error(f"  [{host_manager.config.hostname}] Reboot exception: {e}")
+                        reboot_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': str(e)
+                        }
+            except TimeoutError:
+                logger.error(f"Reboot phase timed out after {overall_timeout}s")
+                # Mark any hosts without results as timed out
+                for host_manager in self.host_managers:
+                    if host_manager.host_id not in reboot_results:
+                        logger.error(f"  [{host_manager.config.hostname}] Reboot timed out")
+                        reboot_results[host_manager.host_id] = {
+                            'success': False,
+                            'error': f'Reboot timed out after {overall_timeout}s'
+                        }
+
+        # Check if any reboot failed
+        if not all(r.get('success', False) for r in reboot_results.values()):
+            logger.error("One or more hosts failed to reboot - marking iteration SKIP")
+            iteration.result = TestResult.SKIP
+            iteration.error = "Boot failed on one or more hosts"
+
+            # Prepare bulk results for all hosts
+            bulk_results = []
+            for host_manager in self.host_managers:
+                result_data = reboot_results.get(host_manager.host_id, {})
+                bulk_results.append({
+                    'iteration_id': iteration_id,
+                    'host_id': host_manager.host_id,
+                    'build_result': "success",
+                    'boot_result': "failure" if not result_data.get('success') else "success",
+                    'final_result': "skip",
+                    'error_message': result_data.get('error')
+                })
+
+            # Store all results in a single transaction
+            self.state.create_iteration_results_bulk(bulk_results)
+
+            success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
+            if not success:
+                logger.error("Failed to mark commit as SKIP in git bisect")
+
+            return (False, reboot_results, bisection_complete)
+
+        logger.info("✓ All hosts rebooted successfully")
+        return (True, reboot_results, False)
+
+    def _test_and_aggregate_phase(
+        self, iteration_id: int, commit_sha: str, iteration: "BisectIteration"
+    ) -> bool:
+        """Phase 3 & 4: Run tests on all hosts and aggregate results.
+
+        Args:
+            iteration_id: Database iteration ID
+            commit_sha: Commit SHA being tested
+            iteration: Iteration object to update with results
+
+        Returns:
+            bisection_complete flag
+        """
+        iteration.state = BisectState.TESTING
+        logger.info(f"Running tests on {len(self.host_managers)} hosts...")
+
+        test_results = {}
+        # Add 10% buffer to configured timeout for parallel execution overhead
+        overall_timeout = self.config.test_timeout * 1.1
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._test_on_host,
+                    host_manager,
+                    iteration_id
+                ): host_manager
+                for host_manager in self.host_managers
+            }
+
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    host_manager = futures[future]
+                    try:
+                        test_result, test_output = future.result()
+                        test_results[host_manager.host_id] = {
+                            'result': test_result,
+                            'output': test_output
+                        }
+                    except Exception as e:
+                        logger.error(f"  [{host_manager.config.hostname}] Test exception: {e}")
+                        test_results[host_manager.host_id] = {
+                            'result': TestResult.SKIP,
+                            'error': str(e)
+                        }
+            except TimeoutError:
+                logger.error(f"Test phase timed out after {overall_timeout}s")
+                # Mark any hosts without results as timed out
+                for host_manager in self.host_managers:
+                    if host_manager.host_id not in test_results:
+                        logger.error(f"  [{host_manager.config.hostname}] Test timed out")
+                        test_results[host_manager.host_id] = {
+                            'result': TestResult.SKIP,
+                            'error': f'Test timed out after {overall_timeout}s'
+                        }
+
+        # Prepare bulk results for all hosts
+        bulk_results = []
+        for host_manager in self.host_managers:
+            result_data = test_results.get(host_manager.host_id, {})
+            test_result = result_data.get('result', TestResult.SKIP)
+            bulk_results.append({
+                'iteration_id': iteration_id,
+                'host_id': host_manager.host_id,
+                'build_result': "success",
+                'boot_result': "success",
+                'test_result': test_result.value,
+                'final_result': test_result.value,
+                'test_output': result_data.get('output', ''),
+                'error_message': result_data.get('error')
+            })
+
+        # Store all results in a single transaction
+        self.state.create_iteration_results_bulk(bulk_results)
+
+        # Aggregate: ALL pass = GOOD, ANY fail = BAD, ANY skip = SKIP
+        all_results = [r['result'] for r in test_results.values()]
+
+        if all(r == TestResult.GOOD for r in all_results):
+            final_result = TestResult.GOOD
+            logger.info("✓ All hosts passed - marking commit GOOD")
+        elif any(r == TestResult.BAD for r in all_results):
+            final_result = TestResult.BAD
+            # Show which hosts failed
+            failed_hosts = [
+                host_manager.config.hostname
+                for host_manager in self.host_managers
+                if test_results[host_manager.host_id]['result'] == TestResult.BAD
+            ]
+            logger.error(f"✗ Failed on: {', '.join(failed_hosts)} - marking commit BAD")
+        else:
+            final_result = TestResult.SKIP
+            logger.warning("One or more hosts skipped - marking commit SKIP")
+
+        iteration.result = final_result
+
+        # Update iteration in database
+        self.state.update_iteration(
+            iteration_id,
+            final_result=final_result.value,
+            end_time=datetime.now(timezone.utc).isoformat()
+        )
+
+        # Mark in git bisect
+        success, bisection_complete = self.mark_commit(commit_sha, final_result)
+        if not success:
+            logger.error("Failed to mark commit in git bisect - bisection state may be inconsistent")
+
+        return bisection_complete
+
+    # ===========================================================================
+    # End of Phase Extraction Methods
+    # ===========================================================================
+
     def _run_multihost_iteration(
         self,
         iteration: BisectIteration,
@@ -1062,207 +1524,27 @@ class BisectMaster:
         bisection_complete = False
 
         try:
-            # ===================================================================
-            # PHASE 1: Build kernel on all hosts in parallel
-            # ===================================================================
-            iteration.state = BisectState.BUILDING
-            logger.info(f"Building kernel on {len(self.host_managers)} hosts...")
-
-            build_results = {}
-            with ThreadPoolExecutor() as executor:
-                futures = {
-                    executor.submit(
-                        self._build_on_host,
-                        host_manager,
-                        commit_sha,
-                        iteration_id
-                    ): host_manager
-                    for host_manager in self.host_managers
-                }
-
-                for future in as_completed(futures):
-                    host_manager = futures[future]
-                    try:
-                        success, exit_code, log_id, kernel_ver = future.result()
-                        build_results[host_manager.host_id] = {
-                            'success': success,
-                            'kernel_ver': kernel_ver,
-                            'exit_code': exit_code,
-                            'log_id': log_id
-                        }
-                    except Exception as e:
-                        logger.error(f"  [{host_manager.config.hostname}] Build exception: {e}")
-                        build_results[host_manager.host_id] = {
-                            'success': False,
-                            'error': str(e)
-                        }
-
-            # Check if any build failed
-            if not all(r.get('success', False) for r in build_results.values()):
-                logger.error("One or more hosts failed to build - marking iteration SKIP")
-                iteration.result = TestResult.SKIP
-                iteration.error = "Build failed on one or more hosts"
-
-                # Store per-host results
-                for host_manager in self.host_managers:
-                    result_data = build_results.get(host_manager.host_id, {})
-                    self.state.create_iteration_result(
-                        iteration_id=iteration_id,
-                        host_id=host_manager.host_id,
-                        build_result="failure" if not result_data.get('success') else "success",
-                        final_result="skip",
-                        error_message=result_data.get('error')
-                    )
-
-                success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
-                if not success:
-                    logger.error("Failed to mark commit as SKIP in git bisect")
-
+            # Phase 0: Validate commit
+            phase_ok, bisection_complete = self._validate_commit_phase(commit_sha, iteration)
+            if not phase_ok:
                 return (iteration, bisection_complete)
 
-            logger.info("✓ All hosts built successfully")
-
-            # ===================================================================
-            # PHASE 2: Reboot all hosts in parallel
-            # ===================================================================
-            iteration.state = BisectState.REBOOTING
-            logger.info(f"Rebooting {len(self.host_managers)} hosts...")
-
-            reboot_results = {}
-            with ThreadPoolExecutor() as executor:
-                futures = {
-                    executor.submit(
-                        self._reboot_host,
-                        host_manager,
-                        iteration_id,
-                        build_results[host_manager.host_id]['kernel_ver']
-                    ): host_manager
-                    for host_manager in self.host_managers
-                }
-
-                for future in as_completed(futures):
-                    host_manager = futures[future]
-                    try:
-                        success, actual_kernel_ver = future.result()
-                        reboot_results[host_manager.host_id] = {
-                            'success': success,
-                            'actual_kernel_ver': actual_kernel_ver
-                        }
-                    except Exception as e:
-                        logger.error(f"  [{host_manager.config.hostname}] Reboot exception: {e}")
-                        reboot_results[host_manager.host_id] = {
-                            'success': False,
-                            'error': str(e)
-                        }
-
-            # Check if any reboot failed
-            if not all(r.get('success', False) for r in reboot_results.values()):
-                logger.error("One or more hosts failed to reboot - marking iteration SKIP")
-                iteration.result = TestResult.SKIP
-                iteration.error = "Boot failed on one or more hosts"
-
-                # Store per-host results
-                for host_manager in self.host_managers:
-                    result_data = reboot_results.get(host_manager.host_id, {})
-                    self.state.create_iteration_result(
-                        iteration_id=iteration_id,
-                        host_id=host_manager.host_id,
-                        build_result="success",
-                        boot_result="failure" if not result_data.get('success') else "success",
-                        final_result="skip",
-                        error_message=result_data.get('error')
-                    )
-
-                success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
-                if not success:
-                    logger.error("Failed to mark commit as SKIP in git bisect")
-
-                return (iteration, bisection_complete)
-
-            logger.info("✓ All hosts rebooted successfully")
-
-            # ===================================================================
-            # PHASE 3: Run tests on all hosts in parallel
-            # ===================================================================
-            iteration.state = BisectState.TESTING
-            logger.info(f"Running tests on {len(self.host_managers)} hosts...")
-
-            test_results = {}
-            with ThreadPoolExecutor() as executor:
-                futures = {
-                    executor.submit(
-                        self._test_on_host,
-                        host_manager,
-                        iteration_id
-                    ): host_manager
-                    for host_manager in self.host_managers
-                }
-
-                for future in as_completed(futures):
-                    host_manager = futures[future]
-                    try:
-                        test_result, test_output = future.result()
-                        test_results[host_manager.host_id] = {
-                            'result': test_result,
-                            'output': test_output
-                        }
-                    except Exception as e:
-                        logger.error(f"  [{host_manager.config.hostname}] Test exception: {e}")
-                        test_results[host_manager.host_id] = {
-                            'result': TestResult.SKIP,
-                            'error': str(e)
-                        }
-
-            # ===================================================================
-            # PHASE 4: Aggregate results and store per-host data
-            # ===================================================================
-            # Store per-host results
-            for host_manager in self.host_managers:
-                result_data = test_results.get(host_manager.host_id, {})
-                test_result = result_data.get('result', TestResult.SKIP)
-                self.state.create_iteration_result(
-                    iteration_id=iteration_id,
-                    host_id=host_manager.host_id,
-                    build_result="success",
-                    boot_result="success",
-                    test_result=test_result.value,
-                    final_result=test_result.value,
-                    test_output=result_data.get('output', ''),
-                    error_message=result_data.get('error')
-                )
-
-            # Aggregate: ALL pass = GOOD, ANY fail = BAD, ANY skip = SKIP
-            all_results = [r['result'] for r in test_results.values()]
-
-            if all(r == TestResult.GOOD for r in all_results):
-                final_result = TestResult.GOOD
-                logger.info("✓ All hosts passed - marking commit GOOD")
-            elif any(r == TestResult.BAD for r in all_results):
-                final_result = TestResult.BAD
-                # Show which hosts failed
-                failed_hosts = [
-                    host_manager.config.hostname
-                    for host_manager in self.host_managers
-                    if test_results[host_manager.host_id]['result'] == TestResult.BAD
-                ]
-                logger.error(f"✗ Failed on: {', '.join(failed_hosts)} - marking commit BAD")
-            else:
-                final_result = TestResult.SKIP
-                logger.warning("One or more hosts skipped - marking commit SKIP")
-
-            iteration.result = final_result
-
-            # Update iteration in database
-            self.state.update_iteration(
-                iteration_id,
-                final_result=final_result.value,
-                end_time=datetime.now(timezone.utc).isoformat()
+            # Phase 1: Build
+            phase_ok, build_results, bisection_complete = self._build_phase(
+                commit_sha, iteration_id, iteration
             )
+            if not phase_ok:
+                return (iteration, bisection_complete)
 
-            # Mark in git bisect
-            success, bisection_complete = self.mark_commit(commit_sha, final_result)
-            if not success:
-                logger.error("Failed to mark commit in git bisect - bisection state may be inconsistent")
+            # Phase 2: Reboot
+            phase_ok, reboot_results, bisection_complete = self._reboot_phase(
+                iteration_id, build_results, commit_sha, iteration
+            )
+            if not phase_ok:
+                return (iteration, bisection_complete)
+
+            # Phase 3 & 4: Test and aggregate
+            bisection_complete = self._test_and_aggregate_phase(iteration_id, commit_sha, iteration)
 
         except Exception as exc:
             logger.error(f"Multi-host iteration failed with exception: {exc}")

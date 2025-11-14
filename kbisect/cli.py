@@ -127,6 +127,7 @@ def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig
             kernel_path=host_dict.get("kernel_path", "/root/kernel"),
             bisect_path=host_dict.get("bisect_path", "/root/kernel-bisect/lib"),
             test_script=host_dict.get("test_script", "test.sh"),
+            power_control_type=host_dict.get("power_control_type", "ipmi"),
             ipmi_host=host_dict.get("ipmi_host"),
             ipmi_user=host_dict.get("ipmi_user"),
             ipmi_password=host_dict.get("ipmi_password"),
@@ -227,6 +228,119 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 1
 
 
+def _resume_session(
+    session,
+    state: StateManager,
+    config_dict: dict
+) -> bool:
+    """Resume a halted bisection session.
+
+    Args:
+        session: The halted session to resume
+        state: StateManager instance
+        config_dict: Configuration dictionary
+
+    Returns:
+        True if resume was successful, False otherwise
+    """
+    print("=" * 70)
+    print("RESUMING HALTED BISECTION SESSION")
+    print("=" * 70)
+    print(f"\nSession ID: {session.session_id}")
+    print(f"Good commit: {session.good_commit}")
+    print(f"Bad commit: {session.bad_commit}")
+    print(f"Started: {session.start_time}")
+
+    # Get last iteration to show what failed
+    iterations = state.get_iterations(session.session_id)
+    if iterations:
+        last_iteration = iterations[-1]
+        print(f"\nLast iteration: {last_iteration.iteration_num}")
+        print(f"Failed commit: {last_iteration.commit_sha[:7]}")
+        if last_iteration.error_message:
+            print(f"Error: {last_iteration.error_message}")
+
+    print("\nThe previous session was halted due to host being unreachable.")
+    print("Before resuming, please ensure:")
+    print("  1. All host machines are powered on and stable")
+    print("  2. Stable kernels are booted on all hosts")
+    print("  3. SSH connectivity is working for all hosts")
+
+    # Verify connectivity to all hosts before resuming
+    print("\nVerifying host connectivity...")
+
+    if "hosts" not in config_dict or not config_dict["hosts"]:
+        print("✗ Config file must have 'hosts' section")
+        return False
+
+    from kbisect.remote import SSHClient
+
+    all_reachable = True
+    ssh_clients = []
+    for host_dict in config_dict["hosts"]:
+        host_name = host_dict["hostname"]
+        host_user = host_dict.get("ssh_user", "root")
+        ssh = SSHClient(host_name, host_user)
+        ssh_clients.append((host_name, ssh, host_dict))
+
+        if not ssh.is_alive():
+            print(f"  ✗ {host_name} is unreachable!")
+            all_reachable = False
+        else:
+            print(f"  ✓ {host_name} is reachable")
+
+    if not all_reachable:
+        print("\n✗ One or more hosts are still unreachable!")
+        print("\nPlease fix the host machines and try again.")
+        return False
+
+    print("\n✓ All hosts are reachable")
+    print("Resuming bisection from halted state...")
+
+    # Check if there's a pending commit to mark
+    if iterations:
+        last_iteration = iterations[-1]
+        if last_iteration.error_message and "(git mark pending" in last_iteration.error_message:
+            print(f"Marking pending commit {last_iteration.commit_sha[:7]}...")
+
+            # Determine what to mark based on error message
+            if "Boot timeout" in last_iteration.error_message or "Kernel panic" in last_iteration.error_message:
+                # Determine mark type based on original test type
+                test_type = config_dict.get("test", {}).get("type", "boot")
+                if test_type == "boot":
+                    mark_as = "bad"
+                    print("  Boot test mode: marking as BAD")
+                else:
+                    mark_as = "skip"
+                    print("  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)")
+
+                # Mark the commit via SSH (use first host since all share git state)
+                first_host_name, first_ssh, first_host_dict = ssh_clients[0]
+                kernel_path = first_host_dict.get('kernel_path', '/root/kernel')
+                mark_cmd = f"cd {kernel_path} && git bisect {mark_as}"
+                ret, _, stderr = first_ssh.run_command(mark_cmd)
+
+                if ret == 0:
+                    print(f"✓ Commit marked as {mark_as}")
+                    # Update iteration with final result
+                    state.update_iteration(
+                        last_iteration.iteration_id,
+                        final_result=mark_as,
+                        error_message=last_iteration.error_message.replace(" (git mark pending - slave down)", "")
+                    )
+                else:
+                    print(f"✗ Failed to mark commit: {stderr}")
+                    print("  Please mark manually and try again")
+                    return False
+
+    print("Bisection will continue from next commit.")
+    print("=" * 70 + "\n")
+
+    # Update session status back to running
+    state.update_session(session.session_id, status="running")
+    return True
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     """Start bisection.
 
@@ -256,104 +370,9 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     # Check for halted session and handle resume
     if session and session.status == "halted":
-        print("=" * 70)
-        print("RESUMING HALTED BISECTION SESSION")
-        print("=" * 70)
-        print(f"\nSession ID: {session.session_id}")
-        print(f"Good commit: {session.good_commit}")
-        print(f"Bad commit: {session.bad_commit}")
-        print(f"Started: {session.start_time}")
-
-        # Get last iteration to show what failed
-        iterations = state.get_iterations(session.session_id)
-        if iterations:
-            last_iteration = iterations[-1]
-            print(f"\nLast iteration: {last_iteration.iteration_num}")
-            print(f"Failed commit: {last_iteration.commit_sha[:7]}")
-            if last_iteration.error_message:
-                print(f"Error: {last_iteration.error_message}")
-
-        print("\nThe previous session was halted due to host being unreachable.")
-        print("Before resuming, please ensure:")
-        print("  1. All host machines are powered on and stable")
-        print("  2. Stable kernels are booted on all hosts")
-        print("  3. SSH connectivity is working for all hosts")
-
-        # Verify connectivity to all hosts before resuming
-        print("\nVerifying host connectivity...")
-
-        if "hosts" not in config_dict or not config_dict["hosts"]:
-            print("✗ Config file must have 'hosts' section")
+        if not _resume_session(session, state, config_dict):
             state.close()
             return 1
-
-        from kbisect.remote import SSHClient
-
-        all_reachable = True
-        ssh_clients = []
-        for host_dict in config_dict["hosts"]:
-            host_name = host_dict["hostname"]
-            host_user = host_dict.get("ssh_user", "root")
-            ssh = SSHClient(host_name, host_user)
-            ssh_clients.append((host_name, ssh, host_dict))
-
-            if not ssh.is_alive():
-                print(f"  ✗ {host_name} is unreachable!")
-                all_reachable = False
-            else:
-                print(f"  ✓ {host_name} is reachable")
-
-        if not all_reachable:
-            print("\n✗ One or more hosts are still unreachable!")
-            print("\nPlease fix the host machines and try again.")
-            state.close()
-            return 1
-
-        print("\n✓ All hosts are reachable")
-        print("Resuming bisection from halted state...")
-
-        # Check if there's a pending commit to mark
-        if iterations:
-            last_iteration = iterations[-1]
-            if last_iteration.error_message and "(git mark pending" in last_iteration.error_message:
-                print(f"Marking pending commit {last_iteration.commit_sha[:7]}...")
-
-                # Determine what to mark based on error message
-                if "Boot timeout" in last_iteration.error_message or "Kernel panic" in last_iteration.error_message:
-                    # Determine mark type based on original test type
-                    test_type = config_dict.get("test", {}).get("type", "boot")
-                    if test_type == "boot":
-                        mark_as = "bad"
-                        print("  Boot test mode: marking as BAD")
-                    else:
-                        mark_as = "skip"
-                        print("  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)")
-
-                    # Mark the commit via SSH (use first host since all share git state)
-                    first_host_name, first_ssh, first_host_dict = ssh_clients[0]
-                    kernel_path = first_host_dict.get('kernel_path', '/root/kernel')
-                    mark_cmd = f"cd {kernel_path} && git bisect {mark_as}"
-                    ret, _, stderr = first_ssh.run_command(mark_cmd)
-
-                    if ret == 0:
-                        print(f"✓ Commit marked as {mark_as}")
-                        # Update iteration with final result
-                        state.update_iteration(
-                            last_iteration.iteration_id,
-                            final_result=mark_as,
-                            error_message=last_iteration.error_message.replace(" (git mark pending - slave down)", "")
-                        )
-                    else:
-                        print(f"✗ Failed to mark commit: {stderr}")
-                        print("  Please mark manually and try again")
-                        state.close()
-                        return 1
-
-        print("Bisection will continue from next commit.")
-        print("=" * 70 + "\n")
-
-        # Update session status back to running
-        state.update_session(session.session_id, status="running")
 
     # Create bisect config
     config = create_bisect_config(config_dict, args)
@@ -585,6 +604,184 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_logs_list(state: StateManager, args: argparse.Namespace) -> int:
+    """Handle 'logs list' subcommand."""
+    session_id = args.session_id
+    log_type = args.log_type
+
+    logs = state.list_build_logs(session_id=session_id, log_type=log_type)
+
+    if not logs:
+        print("No build logs found")
+        return 0
+
+    print("=== Build Logs ===\n")
+    print(f"{'Log ID':<8} {'Iter':<6} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}")
+    print("-" * 80)
+
+    for log in logs:
+        size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
+        timestamp = log["timestamp"][:19] if log["timestamp"] else "N/A"
+        print(
+            f"{log['log_id']:<8} {log['iteration_num']:<6} "
+            f"{log['commit_sha'][:7]:<9} {log['log_type']:<8} "
+            f"{log['status']:<10} {size_kb:>7.1f} KB {timestamp:<20}"
+        )
+    return 0
+
+
+def _handle_logs_show(state: StateManager, args: argparse.Namespace) -> int:
+    """Handle 'logs show' subcommand."""
+    log_data = state.get_build_log(args.log_id)
+
+    if not log_data:
+        print(f"Log {args.log_id} not found")
+        return 1
+
+    print(f"=== Build Log {args.log_id} ===\n")
+    print(f"Iteration:     {log_data['iteration_num']}")
+    print(f"Commit:        {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
+    print(f"Type:          {log_data['log_type']}")
+    print(f"Exit code:     {log_data['exit_code']}")
+    size_kb = log_data['size_bytes'] / 1024 if log_data.get('size_bytes') else 0
+    print(f"Size:          {size_kb:.1f} KB (compressed)")
+    print(f"Timestamp:     {log_data['timestamp']}")
+    print("\n" + "=" * 80 + "\n")
+    print(log_data["content"])
+    return 0
+
+
+def _handle_logs_iteration(state: StateManager, args: argparse.Namespace) -> int:
+    """Handle 'logs iteration' subcommand."""
+    session = state.get_latest_session()
+    if not session:
+        print("No active bisection session found")
+        return 1
+
+    iterations = state.get_iterations(session.session_id)
+    target_iteration = None
+
+    for it in iterations:
+        if it.iteration_num == args.iteration_num:
+            target_iteration = it
+            break
+
+    if not target_iteration:
+        print(f"Iteration {args.iteration_num} not found")
+        return 1
+
+    # Get logs for this iteration
+    logs = state.get_iteration_build_logs(target_iteration.iteration_id)
+
+    if not logs:
+        print(f"No logs found for iteration {args.iteration_num}")
+        return 0
+
+    print(f"=== Logs for Iteration {args.iteration_num} ===\n")
+    print(f"Commit: {target_iteration.commit_sha[:7]} - {target_iteration.commit_message}")
+    print("\nLogs:")
+
+    for log in logs:
+        size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
+        exit_status = (
+            "RUNNING" if log["exit_code"] is None
+            else ("SUCCESS" if log["exit_code"] == 0 else "FAILED")
+        )
+        print(f"  Log ID {log['log_id']}: {log['log_type']} - {exit_status} ({size_kb:.1f} KB)")
+
+    print("\nView log: kbisect logs show <log-id>")
+    return 0
+
+
+def _handle_logs_export(state: StateManager, args: argparse.Namespace) -> int:
+    """Handle 'logs export' subcommand."""
+    log_data = state.get_build_log(args.log_id)
+
+    if not log_data:
+        print(f"Log {args.log_id} not found")
+        return 1
+
+    output_path = Path(args.output_file)
+
+    try:
+        with output_path.open("w") as f:
+            f.write(log_data["content"])
+        print(f"Log {args.log_id} exported to: {output_path}")
+        file_size = output_path.stat().st_size
+        size_kb = file_size / 1024 if file_size else 0
+        print(f"Size: {size_kb:.1f} KB (uncompressed)")
+        return 0
+    except Exception as exc:
+        print(f"Failed to export log: {exc}")
+        return 1
+
+
+def _handle_logs_tail(state: StateManager, args: argparse.Namespace) -> int:
+    """Handle 'logs tail' subcommand."""
+    log_id = args.log_id
+    interval = args.interval
+
+    # Get initial log state
+    log_data = state.get_build_log(log_id)
+    if not log_data:
+        print(f"Log {log_id} not found")
+        return 1
+
+    # Display header
+    print(f"=== Tailing Log {log_id} ===")
+    print(f"Type:      {log_data['log_type']}")
+    print(f"Iteration: {log_data['iteration_num']}")
+    print(f"Commit:    {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
+    if log_data['exit_code'] is not None:
+        exit_status = "SUCCESS" if log_data['exit_code'] == 0 else "FAILED"
+        print(f"Status:    {exit_status} (already completed)")
+    else:
+        print("Status:    IN PROGRESS")
+    print(f"Interval:  {interval}s")
+    print("\nPress Ctrl+C to stop")
+    print("=" * 80 + "\n")
+
+    # Display initial content
+    print(log_data["content"], end="", flush=True)
+    last_length = len(log_data["content"])
+
+    # If already finalized, no need to poll
+    if log_data['exit_code'] is not None:
+        print(f"\n\n[Log already finalized with exit code: {log_data['exit_code']}]")
+        return 0
+
+    # Poll for updates
+    try:
+        while True:
+            time.sleep(interval)
+
+            # Re-fetch log
+            log_data = state.get_build_log(log_id)
+            if not log_data:
+                print("\n\n[Error: Log no longer exists]")
+                break
+
+            current_content = log_data["content"]
+            current_length = len(current_content)
+
+            # Display new content
+            if current_length > last_length:
+                new_content = current_content[last_length:]
+                print(new_content, end="", flush=True)
+                last_length = current_length
+
+            # Check if finalized
+            if log_data["exit_code"] is not None:
+                exit_status = "SUCCESS" if log_data["exit_code"] == 0 else "FAILED"
+                print(f"\n\n[Log finalized: {exit_status} (exit code: {log_data['exit_code']})]")
+                break
+
+    except KeyboardInterrupt:
+        print("\n\n[Tail stopped by user]")
+
+    return 0
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     """Manage build logs.
 
@@ -596,177 +793,24 @@ def cmd_logs(args: argparse.Namespace) -> int:
     """
     state = StateManager()
 
-    if args.logs_command == "list":
-        # List all logs
-        session_id = args.session_id
-        log_type = args.log_type
+    # Dispatch to appropriate handler
+    handlers = {
+        "list": _handle_logs_list,
+        "show": _handle_logs_show,
+        "iteration": _handle_logs_iteration,
+        "export": _handle_logs_export,
+        "tail": _handle_logs_tail,
+    }
 
-        logs = state.list_build_logs(session_id=session_id, log_type=log_type)
-
-        if not logs:
-            print("No build logs found")
-            return 0
-
-        print("=== Build Logs ===\n")
-        print(f"{'Log ID':<8} {'Iter':<6} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}")
-        print("-" * 80)
-
-        for log in logs:
-            size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
-            timestamp = log["timestamp"][:19] if log["timestamp"] else "N/A"
-            print(
-                f"{log['log_id']:<8} {log['iteration_num']:<6} "
-                f"{log['commit_sha'][:7]:<9} {log['log_type']:<8} "
-                f"{log['status']:<10} {size_kb:>7.1f} KB {timestamp:<20}"
-            )
-
-    elif args.logs_command == "show":
-        # Show specific log
-        log_data = state.get_build_log(args.log_id)
-
-        if not log_data:
-            print(f"Log {args.log_id} not found")
-            return 1
-
-        print(f"=== Build Log {args.log_id} ===\n")
-        print(f"Iteration:     {log_data['iteration_num']}")
-        print(f"Commit:        {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
-        print(f"Type:          {log_data['log_type']}")
-        print(f"Exit code:     {log_data['exit_code']}")
-        size_kb = log_data['size_bytes'] / 1024 if log_data.get('size_bytes') else 0
-        print(f"Size:          {size_kb:.1f} KB (compressed)")
-        print(f"Timestamp:     {log_data['timestamp']}")
-        print("\n" + "=" * 80 + "\n")
-        print(log_data["content"])
-
-    elif args.logs_command == "iteration":
-        # Show logs for specific iteration
-        # First get iteration to validate and get session info
-        session = state.get_latest_session()
-        if not session:
-            print("No active bisection session found")
-            return 1
-
-        iterations = state.get_iterations(session.session_id)
-        target_iteration = None
-
-        for it in iterations:
-            if it.iteration_num == args.iteration_num:
-                target_iteration = it
-                break
-
-        if not target_iteration:
-            print(f"Iteration {args.iteration_num} not found")
-            return 1
-
-        # Get logs for this iteration
-        logs = state.get_iteration_build_logs(target_iteration.iteration_id)
-
-        if not logs:
-            print(f"No logs found for iteration {args.iteration_num}")
-            return 0
-
-        print(f"=== Logs for Iteration {args.iteration_num} ===\n")
-        print(f"Commit: {target_iteration.commit_sha[:7]} - {target_iteration.commit_message}")
-        print("\nLogs:")
-
-        for log in logs:
-            size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
-            exit_status = (
-                "RUNNING" if log["exit_code"] is None
-                else ("SUCCESS" if log["exit_code"] == 0 else "FAILED")
-            )
-            print(f"  Log ID {log['log_id']}: {log['log_type']} - {exit_status} ({size_kb:.1f} KB)")
-
-        print("\nView log: kbisect logs show <log-id>")
-
-    elif args.logs_command == "export":
-        # Export log to file
-        log_data = state.get_build_log(args.log_id)
-
-        if not log_data:
-            print(f"Log {args.log_id} not found")
-            return 1
-
-        output_path = Path(args.output_file)
-
-        try:
-            with output_path.open("w") as f:
-                f.write(log_data["content"])
-            print(f"Log {args.log_id} exported to: {output_path}")
-            file_size = output_path.stat().st_size
-            size_kb = file_size / 1024 if file_size else 0
-            print(f"Size: {size_kb:.1f} KB (uncompressed)")
-        except Exception as exc:
-            print(f"Failed to export log: {exc}")
-            return 1
-
-    elif args.logs_command == "tail":
-        # Tail log in real-time
-        log_id = args.log_id
-        interval = args.interval
-
-        # Get initial log state
-        log_data = state.get_build_log(log_id)
-        if not log_data:
-            print(f"Log {log_id} not found")
-            return 1
-
-        # Display header
-        print(f"=== Tailing Log {log_id} ===")
-        print(f"Type:      {log_data['log_type']}")
-        print(f"Iteration: {log_data['iteration_num']}")
-        print(f"Commit:    {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
-        if log_data['exit_code'] is not None:
-            exit_status = "SUCCESS" if log_data['exit_code'] == 0 else "FAILED"
-            print(f"Status:    {exit_status} (already completed)")
-        else:
-            print("Status:    IN PROGRESS")
-        print(f"Interval:  {interval}s")
-        print("\nPress Ctrl+C to stop")
-        print("=" * 80 + "\n")
-
-        # Display initial content
-        print(log_data["content"], end="", flush=True)
-        last_length = len(log_data["content"])
-
-        # If already finalized, no need to poll
-        if log_data['exit_code'] is not None:
-            print(f"\n\n[Log already finalized with exit code: {log_data['exit_code']}]")
-            state.close()
-            return 0
-
-        # Poll for updates
-        try:
-            while True:
-                time.sleep(interval)
-
-                # Re-fetch log
-                log_data = state.get_build_log(log_id)
-                if not log_data:
-                    print("\n\n[Error: Log no longer exists]")
-                    break
-
-                current_content = log_data["content"]
-                current_length = len(current_content)
-
-                # Display new content
-                if current_length > last_length:
-                    new_content = current_content[last_length:]
-                    print(new_content, end="", flush=True)
-                    last_length = current_length
-
-                # Check if finalized
-                if log_data["exit_code"] is not None:
-                    exit_status = "SUCCESS" if log_data["exit_code"] == 0 else "FAILED"
-                    print(f"\n\n[Log finalized: {exit_status} (exit code: {log_data['exit_code']})]")
-                    break
-
-        except KeyboardInterrupt:
-            print("\n\n[Tail stopped by user]")
+    handler = handlers.get(args.logs_command)
+    if handler:
+        result = handler(state, args)
+    else:
+        print(f"Unknown logs command: {args.logs_command}")
+        result = 1
 
     state.close()
-    return 0
+    return result
 
 
 def cmd_metadata(args: argparse.Namespace) -> int:

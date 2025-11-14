@@ -36,8 +36,6 @@ dependencies = [
 dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
     "types-PyYAML>=6.0.0",
     "types-sqlalchemy>=1.4.0",
 ]
@@ -87,7 +85,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Unused imports in __init__.py are often intentional
-"tests/**/*.py" = ["ARG", "S"]  # Allow unused arguments and security issues in tests
 
 [tool.ruff.lint.isort]
 known-first-party = ["kbisect"]
@@ -118,26 +115,3 @@ strict_concatenate = true
 [[tool.mypy.overrides]]
 module = "yaml"
 ignore_missing_imports = true
-
-[tool.pytest.ini_options]
-minversion = "7.0"
-addopts = "-ra -q --strict-markers --strict-config"
-testpaths = ["tests"]
-pythonpath = ["src"]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "integration: marks tests as integration tests",
-]
-
-[tool.coverage.run]
-source = ["src"]
-branch = true
-omit = [
-    "*/tests/*",
-    "*/__pycache__/*",
-]
-
-[tool.coverage.report]
-precision = 2
-show_missing = true
-skip_covered = false
