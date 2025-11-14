@@ -144,11 +144,58 @@ class StateManager:
         try:
             # Create all tables if they don't exist
             Base.metadata.create_all(self.engine)
+
+            # Run migrations for existing databases
+            self._run_migrations()
+
             logger.debug(f"Database initialized at {self.db_path}")
         except Exception as exc:
             msg = f"Failed to initialize database: {exc}"
             logger.error(msg)
             raise DatabaseError(msg) from exc
+
+    def _run_migrations(self) -> None:
+        """Run database migrations for schema changes.
+
+        Adds new columns to existing tables if they don't exist.
+        This ensures backward compatibility with existing databases.
+        """
+        import sqlite3
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            # Migration: Add host_id to logs table
+            cursor.execute("PRAGMA table_info(logs)")
+            logs_columns = [col[1] for col in cursor.fetchall()]
+            if "host_id" not in logs_columns:
+                logger.info("Adding host_id column to logs table")
+                cursor.execute("ALTER TABLE logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)")
+                conn.commit()
+
+            # Migration: Add host_id to build_logs table
+            cursor.execute("PRAGMA table_info(build_logs)")
+            build_logs_columns = [col[1] for col in cursor.fetchall()]
+            if "host_id" not in build_logs_columns:
+                logger.info("Adding host_id column to build_logs table")
+                cursor.execute("ALTER TABLE build_logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)")
+                conn.commit()
+
+            # Migration: Add host_id to metadata table
+            cursor.execute("PRAGMA table_info(metadata)")
+            metadata_columns = [col[1] for col in cursor.fetchall()]
+            if "host_id" not in metadata_columns:
+                logger.info("Adding host_id column to metadata table")
+                cursor.execute("ALTER TABLE metadata ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)")
+                conn.commit()
+
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"Migration failed: {exc}")
+            raise
+        finally:
+            conn.close()
 
     def create_session(
         self, good_commit: str, bad_commit: str, config: Optional[Dict[str, Any]] = None
@@ -856,13 +903,14 @@ class StateManager:
         finally:
             session.close()
 
-    def add_log(self, iteration_id: int, log_type: str, message: str) -> None:
+    def add_log(self, iteration_id: int, log_type: str, message: str, host_id: Optional[int] = None) -> None:
         """Add log entry for an iteration.
 
         Args:
             iteration_id: Iteration ID
             log_type: Type of log entry
             message: Log message
+            host_id: Optional host ID to link log to specific machine
 
         Raises:
             DatabaseError: If log creation fails
@@ -871,6 +919,7 @@ class StateManager:
         try:
             new_log = Log(
                 iteration_id=iteration_id,
+                host_id=host_id,
                 log_type=log_type,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 message=message,
@@ -919,7 +968,7 @@ class StateManager:
             session.close()
 
     def create_build_log(
-        self, iteration_id: int, log_type: str, initial_content: str = ""
+        self, iteration_id: int, log_type: str, initial_content: str = "", host_id: Optional[int] = None
     ) -> int:
         """Create initial build log entry for streaming.
 
@@ -927,6 +976,7 @@ class StateManager:
             iteration_id: Iteration ID
             log_type: Type of log (build, boot, test)
             initial_content: Optional initial log content (e.g., header)
+            host_id: Optional host ID to link log to specific machine
 
         Returns:
             Log ID
@@ -942,6 +992,7 @@ class StateManager:
 
             new_log = BuildLog(
                 iteration_id=iteration_id,
+                host_id=host_id,
                 log_type=log_type,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 log_content=compressed_content,
@@ -1223,6 +1274,7 @@ class StateManager:
         session_id: int,
         metadata_dict: Dict[str, Any],
         iteration_id: Optional[int] = None,
+        host_id: Optional[int] = None,
     ) -> int:
         """Store metadata in database.
 
@@ -1230,6 +1282,7 @@ class StateManager:
             session_id: Session ID
             metadata_dict: Metadata dictionary
             iteration_id: Optional iteration ID
+            host_id: Optional host ID to link metadata to specific machine
 
         Returns:
             Metadata ID
@@ -1246,6 +1299,7 @@ class StateManager:
             new_metadata = Metadata(
                 session_id=session_id,
                 iteration_id=iteration_id,
+                host_id=host_id,
                 collection_time=metadata_dict.get(
                     "collection_time", datetime.now(timezone.utc).isoformat()
                 ),
@@ -1416,6 +1470,7 @@ class StateManager:
         iteration_id: Optional[int],
         file_type: str,
         file_content: str,
+        host_id: Optional[int] = None,
         **extra_metadata: Any,
     ) -> int:
         """Store file as a metadata record with collection_type='file'.
@@ -1425,6 +1480,7 @@ class StateManager:
             iteration_id: Iteration ID (None for session-level files)
             file_type: Type of file (e.g., 'kernel_config')
             file_content: File content as text
+            host_id: Optional host ID to link metadata to specific machine
             **extra_metadata: Additional metadata to include in JSON
 
         Returns:
@@ -1442,6 +1498,7 @@ class StateManager:
             new_metadata = Metadata(
                 session_id=session_id,
                 iteration_id=iteration_id,
+                host_id=host_id,
                 collection_time=datetime.now(timezone.utc).isoformat(),
                 collection_type=file_type,  # Use file_type as collection_type (e.g., 'kernel_config')
                 data=file_content,  # Store raw file content directly

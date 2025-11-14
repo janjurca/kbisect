@@ -115,12 +115,14 @@ class Log(Base):
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
+    host_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=True)
     log_type: Mapped[str] = mapped_column(String, nullable=False)
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Relationships
     iteration: Mapped["Iteration"] = relationship("Iteration", back_populates="logs")
+    host: Mapped[Optional["Host"]] = relationship("Host")
 
     def __repr__(self) -> str:
         return f"<Log(id={self.log_id}, type={self.log_type}, iteration={self.iteration_id})>"
@@ -136,6 +138,7 @@ class BuildLog(Base):
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
+    host_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=True)
     log_type: Mapped[str] = mapped_column(String, nullable=False)
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
     log_content: Mapped[bytes] = mapped_column(BLOB, nullable=False)
@@ -145,6 +148,7 @@ class BuildLog(Base):
 
     # Relationships
     iteration: Mapped["Iteration"] = relationship("Iteration", back_populates="build_logs")
+    host: Mapped[Optional["Host"]] = relationship("Host")
 
     def __repr__(self) -> str:
         return (
@@ -167,12 +171,14 @@ class Metadata(Base):
     iteration_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("iterations.iteration_id"), nullable=True
     )
+    host_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=True)
     collection_time: Mapped[str] = mapped_column(String, nullable=False)
     collection_type: Mapped[str] = mapped_column(String, nullable=False)
     data: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="metadata_records")
+    host: Mapped[Optional["Host"]] = relationship("Host")
 
     def __repr__(self) -> str:
         return (

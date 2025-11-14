@@ -367,7 +367,7 @@ class BisectMaster:
 
         try:
             metadata_id = self.state.store_metadata(
-                self.session_id, minimal_metadata, iteration_id
+                self.session_id, minimal_metadata, iteration_id, host_id=self.host_managers[0].host_id
             )
             logger.debug(f"Created placeholder metadata record (id: {metadata_id}) for iteration {iteration_id}")
             return metadata_id
@@ -938,7 +938,7 @@ class BisectMaster:
         log_header += f"Config: {kernel_config or 'default'}\n\n"
         log_header += "=== BUILD OUTPUT ===\n"
 
-        log_id = self.state.create_build_log(iteration_id, "build", log_header)
+        log_id = self.state.create_build_log(iteration_id, "build", log_header, host_id=host_manager.host_id)
 
         # Streaming state
         buffer = []
@@ -1113,7 +1113,7 @@ class BisectMaster:
         log_header += f"Timeout: {host_manager.test_timeout}s\n\n"
         log_header += "=== TEST OUTPUT ===\n"
 
-        log_id = self.state.create_build_log(iteration_id, "test", log_header)
+        log_id = self.state.create_build_log(iteration_id, "test", log_header, host_id=host_manager.host_id)
 
         # Streaming state
         buffer = []
