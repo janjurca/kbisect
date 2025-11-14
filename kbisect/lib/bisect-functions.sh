@@ -378,6 +378,14 @@ build_kernel() {
     echo "" >&2
     cd "$kernel_path" || return 1
 
+    # Fix any Git index corruption before attempting reset
+    # Index can become corrupted from interrupted operations or disk issues
+    if ! fix_git_index_corruption "$kernel_path"; then
+        echo "✗ Failed to fix Git index corruption" >&2
+        echo "Manual intervention required: rm -f $kernel_path/.git/index && cd $kernel_path && git reset" >&2
+        return 1
+    fi
+
     # Reset repository to clean state before checkout
     # This removes any modifications from previous builds or file timestamp changes
     echo "Resetting repository to clean state..." >&2
@@ -892,6 +900,50 @@ test_custom_script() {
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
+
+fix_git_index_corruption() {
+    local repo_path="${1:-.}"
+
+    echo "Checking for Git index corruption..." >&2
+
+    # Try a simple git status to detect index issues
+    if git -C "$repo_path" status >/dev/null 2>&1; then
+        echo "✓ Git index is healthy" >&2
+        return 0
+    fi
+
+    # Check if error is specifically about index file
+    local error_msg=$(git -C "$repo_path" status 2>&1)
+    if [[ "$error_msg" == *"index file smaller than expected"* ]] || \
+       [[ "$error_msg" == *"index file corrupt"* ]] || \
+       [[ "$error_msg" == *"bad index"* ]]; then
+
+        echo "⚠ Detected Git index corruption" >&2
+        echo "Removing corrupted index file..." >&2
+
+        # Remove corrupted index
+        if rm -f "$repo_path/.git/index" 2>&1; then
+            echo "✓ Removed corrupted index file" >&2
+        else
+            echo "✗ Failed to remove index file" >&2
+            return 1
+        fi
+
+        # Let Git recreate the index with reset
+        echo "Recreating Git index..." >&2
+        if git -C "$repo_path" reset 2>&1; then
+            echo "✓ Git index recreated successfully" >&2
+            return 0
+        else
+            echo "✗ Failed to recreate Git index" >&2
+            return 1
+        fi
+    fi
+
+    # Some other Git error
+    echo "✗ Git error (not index corruption): $error_msg" >&2
+    return 1
+}
 
 get_kernel_version() {
     uname -r

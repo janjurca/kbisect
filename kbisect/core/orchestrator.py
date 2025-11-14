@@ -666,6 +666,10 @@ class BisectMaster:
                     all_success = False
                     continue
 
+                # Configure git safe.directory before any git operations
+                if not self._configure_git_safe_directory(host_manager):
+                    logger.warning(f"  Failed to configure git safe.directory on {host_manager.config.hostname}")
+
                 # Reset repository to clean state
                 ret, _stdout, stderr = host_manager.ssh.run_command(
                     f"cd {shlex.quote(kernel_path)} && git reset --hard HEAD",
@@ -673,10 +677,6 @@ class BisectMaster:
                 )
                 if ret != 0:
                     logger.warning(f"  Failed to reset repository: {stderr}")
-
-                # Configure git safe.directory
-                if not self._configure_git_safe_directory(host_manager):
-                    logger.warning(f"  Failed to configure git safe.directory on {host_manager.config.hostname}")
 
                 logger.info(f"  ✓ Transfer successful")
 
