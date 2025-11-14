@@ -640,9 +640,12 @@ class BisectMaster:
                 continue
 
             # Transfer repository using rsync
+            # Exclude .git/index files to prevent corruption from copying incomplete/inconsistent index
             rsync_cmd = [
                 "rsync",
                 "-avz",
+                "--exclude=.git/index",
+                "--exclude=.git/index.lock",
                 "-e",
                 f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout={host_manager.ssh_connect_timeout}",
                 f"{local_repo_path}/",
@@ -670,15 +673,31 @@ class BisectMaster:
                 if not self._configure_git_safe_directory(host_manager):
                     logger.warning(f"  Failed to configure git safe.directory on {host_manager.config.hostname}")
 
-                # Reset repository to clean state
+                # Clean up and regenerate Git index (prevents corruption from partial rsync)
+                # Remove any existing index files and let Git recreate them
+                logger.debug(f"  Regenerating Git index on {hostname}...")
                 ret, _stdout, stderr = host_manager.ssh.run_command(
-                    f"cd {shlex.quote(kernel_path)} && git reset --hard HEAD",
+                    f"cd {shlex.quote(kernel_path)} && "
+                    f"rm -f .git/index .git/index.lock && "
+                    f"git reset --hard HEAD",
                     timeout=host_manager.ssh_connect_timeout
                 )
                 if ret != 0:
-                    logger.warning(f"  Failed to reset repository: {stderr}")
+                    logger.error(f"  Failed to regenerate Git index: {stderr}")
+                    all_success = False
+                    continue
 
-                logger.info(f"  ✓ Transfer successful")
+                # Verify repository health after transfer and index regeneration
+                ret, _stdout, stderr = host_manager.ssh.run_command(
+                    f"cd {shlex.quote(kernel_path)} && git status",
+                    timeout=host_manager.ssh_connect_timeout
+                )
+                if ret != 0:
+                    logger.error(f"  Repository health check failed: {stderr}")
+                    all_success = False
+                    continue
+
+                logger.info(f"  ✓ Transfer successful, repository verified")
 
             except subprocess.TimeoutExpired:
                 logger.error(f"  Repository transfer timed out")
