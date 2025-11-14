@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable, Generator, List, Optional, Tuple
 if TYPE_CHECKING:
     from kbisect.collectors import ConsoleCollector
     from kbisect.power import IPMIController
+    from kbisect.power.beaker import BeakerController
 
 from kbisect.remote import SSHClient
 
@@ -1038,12 +1039,47 @@ class BisectMaster:
 
         return (len(missing_hosts) == 0, missing_hosts)
 
+    def _verify_kernel_boot(
+        self,
+        host_manager: HostManager,
+        expected_kernel_ver: str,
+        actual_kernel_ver: str
+    ) -> Tuple[bool, Optional[str]]:
+        """Verify that the expected kernel actually booted.
+
+        Args:
+            host_manager: HostManager instance
+            expected_kernel_ver: Expected kernel version from build
+            actual_kernel_ver: Actual kernel version from uname -r
+
+        Returns:
+            Tuple of (verification_passed, error_message)
+        """
+        if not expected_kernel_ver or not actual_kernel_ver:
+            return True, None  # Can't verify without both values
+
+        if expected_kernel_ver == actual_kernel_ver:
+            logger.debug(f"[{host_manager.config.hostname}] ✓ Boot verification passed")
+            return True, None
+
+        # Kernel mismatch detected
+        error_msg = (
+            f"Boot verification failed - wrong kernel booted\n"
+            f"  Expected: {expected_kernel_ver}\n"
+            f"  Actual:   {actual_kernel_ver}\n"
+            f"  Likely cause: Test kernel panicked or failed to boot, "
+            f"system fell back to protected kernel"
+        )
+
+        logger.error(f"[{host_manager.config.hostname}] ✗ {error_msg}")
+        return False, error_msg
+
     def _reboot_host(
         self,
         host_manager: HostManager,
         iteration_id: int,
         expected_kernel_ver: Optional[str]
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
         """Reboot a specific host and verify kernel.
 
         Args:
@@ -1052,7 +1088,7 @@ class BisectMaster:
             expected_kernel_ver: Expected kernel version to verify
 
         Returns:
-            Tuple of (success, actual_kernel_version)
+            Tuple of (success, actual_kernel_version, error_message)
         """
         hostname = host_manager.config.hostname
         logger.info(f"  [{hostname}] Rebooting...")
@@ -1060,9 +1096,17 @@ class BisectMaster:
         # Use power controller if available, otherwise fall back to SSH reboot
         if host_manager.power_controller:
             logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
-            if not host_manager.power_controller.reset():
-                logger.error(f"  [{hostname}] Power controller reset failed")
-                return False, None
+
+            # Pass SSH client to BeakerController for shutdown verification
+            from kbisect.power.beaker import BeakerController
+            if isinstance(host_manager.power_controller, BeakerController):
+                if not host_manager.power_controller.reset(ssh_client=host_manager.ssh):
+                    logger.error(f"  [{hostname}] Power controller reset failed")
+                    return False, None, "Power controller reset failed"
+            else:
+                if not host_manager.power_controller.reset():
+                    logger.error(f"  [{hostname}] Power controller reset failed")
+                    return False, None, "Power controller reset failed"
         else:
             logger.info(f"  [{hostname}] Using SSH reboot command")
             # Send reboot command via SSH
@@ -1078,7 +1122,7 @@ class BisectMaster:
         while not host_manager.ssh.is_alive():
             if time.time() - boot_start > host_manager.boot_timeout:
                 logger.error(f"  [{hostname}] Boot timeout after {host_manager.boot_timeout}s")
-                return False, None
+                return False, None, f"Boot timeout after {host_manager.boot_timeout}s"
             time.sleep(5)
 
         # Settle time after boot
@@ -1089,10 +1133,23 @@ class BisectMaster:
         if ret == 0:
             actual_kernel_ver = actual_kernel_ver.strip()
             logger.info(f"  [{hostname}] Booted kernel: {actual_kernel_ver}")
-            return True, actual_kernel_ver
+
+            # Verify expected kernel booted
+            if expected_kernel_ver:
+                verified, error_msg = self._verify_kernel_boot(
+                    host_manager,
+                    expected_kernel_ver,
+                    actual_kernel_ver
+                )
+
+                if not verified:
+                    # Boot verification failed - wrong kernel
+                    return False, actual_kernel_ver, error_msg
+
+            return True, actual_kernel_ver, None
         else:
             logger.warning(f"  [{hostname}] Could not determine booted kernel version")
-            return True, None
+            return True, None, None
 
     def _test_on_host(
         self,
@@ -1345,10 +1402,11 @@ class BisectMaster:
                 for future in as_completed(futures, timeout=overall_timeout):
                     host_manager = futures[future]
                     try:
-                        success, actual_kernel_ver = future.result()
+                        success, actual_kernel_ver, error_msg = future.result()
                         reboot_results[host_manager.host_id] = {
                             'success': success,
-                            'actual_kernel_ver': actual_kernel_ver
+                            'actual_kernel_ver': actual_kernel_ver,
+                            'error': error_msg
                         }
                     except Exception as e:
                         logger.error(f"  [{host_manager.config.hostname}] Reboot exception: {e}")
@@ -1369,9 +1427,17 @@ class BisectMaster:
 
         # Check if any reboot failed
         if not all(r.get('success', False) for r in reboot_results.values()):
-            logger.error("One or more hosts failed to reboot - marking iteration SKIP")
+            logger.error("One or more hosts failed to reboot or boot verification failed - marking iteration SKIP")
+
+            # Aggregate error messages for better diagnostics
+            errors = []
+            for host_manager in self.host_managers:
+                result_data = reboot_results.get(host_manager.host_id, {})
+                if not result_data.get('success') and result_data.get('error'):
+                    errors.append(f"{host_manager.config.hostname}: {result_data['error']}")
+
             iteration.result = TestResult.SKIP
-            iteration.error = "Boot failed on one or more hosts"
+            iteration.error = "; ".join(errors) if errors else "Boot failed on one or more hosts"
 
             # Prepare bulk results for all hosts
             bulk_results = []

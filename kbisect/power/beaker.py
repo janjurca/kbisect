@@ -8,13 +8,16 @@ Requires bkr client to be installed and user authenticated via Kerberos.
 import logging
 import subprocess
 import time
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from kbisect.power.base import (
     BootDevice,
     PowerController,
     PowerState,
 )
+
+if TYPE_CHECKING:
+    from kbisect.remote.ssh import SSHClient
 
 
 logger = logging.getLogger(__name__)
@@ -178,14 +181,26 @@ class BeakerController(PowerController):
         logger.info(f"✓ Power cycle complete for {self.hostname}")
         return True
 
-    def reset(self) -> bool:
+    def reset(self, ssh_client: Optional["SSHClient"] = None) -> bool:
         """Reset (hard reboot) the system.
 
+        Args:
+            ssh_client: Optional SSH client for connectivity verification.
+                       If provided, will wait for machine shutdown before returning.
+
         Returns:
-            True if reset command succeeded, False otherwise
+            True if reset command succeeded (and shutdown confirmed if ssh_client provided),
+            False otherwise
         """
         logger.info(f"Resetting system {self.hostname} via Beaker...")
 
+        # Pre-reboot connectivity check
+        if ssh_client:
+            logger.info("Verifying SSH connectivity before reboot...")
+            if not ssh_client.is_alive():
+                logger.warning("SSH not responsive before reboot - machine may already be down")
+
+        # Send reboot command
         try:
             ret, stdout, stderr = self._run_beaker_command("reboot")
         except BeakerError as exc:
@@ -197,6 +212,28 @@ class BeakerController(PowerController):
             return False
 
         logger.info(f"✓ Reset command sent for {self.hostname}")
+
+        # Wait for shutdown if SSH client provided
+        if ssh_client:
+            logger.info("Waiting for machine to shut down...")
+            shutdown_timeout = 120  # Fixed timeout to prevent infinite loop
+            shutdown_poll_interval = 2
+            start_time = time.time()
+
+            while time.time() - start_time < shutdown_timeout:
+                if not ssh_client.is_alive():
+                    elapsed = time.time() - start_time
+                    logger.info(f"✓ Machine shutdown confirmed after {elapsed:.1f}s")
+                    return True
+                time.sleep(shutdown_poll_interval)
+
+            # Timeout reached - shutdown not confirmed
+            logger.warning(
+                f"Shutdown not confirmed within {shutdown_timeout}s - "
+                "machine may still be up or reboot pending"
+            )
+            return False
+
         return True
 
     def set_boot_device(self, device: BootDevice, persistent: bool = False) -> bool:
