@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from kbisect.collectors import ConsoleCollector
     from kbisect.power import IPMIController
     from kbisect.power.base import PowerController
-    from kbisect.power.beaker import BeakerController
 
 from kbisect.config.config import BisectConfig, HostConfig
 from kbisect.remote import SSHClient
@@ -1009,17 +1008,9 @@ class BisectMaster:
         # Use power controller if available, otherwise fall back to SSH reboot
         if host_manager.power_controller:
             logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
-
-            # Pass SSH client to BeakerController for shutdown verification
-            from kbisect.power.beaker import BeakerController
-            if isinstance(host_manager.power_controller, BeakerController):
-                if not host_manager.power_controller.reset(ssh_client=host_manager.ssh):
-                    logger.error(f"  [{hostname}] Power controller reset failed")
-                    return False, None, "Power controller reset failed"
-            else:
-                if not host_manager.power_controller.reset():
-                    logger.error(f"  [{hostname}] Power controller reset failed")
-                    return False, None, "Power controller reset failed"
+            if not host_manager.power_controller.reset():
+                logger.error(f"  [{hostname}] Power controller reset failed")
+                return False, None, "Power controller reset failed"
         else:
             logger.info(f"  [{hostname}] Using SSH reboot command")
             # Send reboot command via SSH

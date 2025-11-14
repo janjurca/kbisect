@@ -8,16 +8,14 @@ Requires bkr client to be installed and user authenticated via Kerberos.
 import logging
 import subprocess
 import time
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import Optional, Tuple
 
 from kbisect.power.base import (
     BootDevice,
     PowerController,
     PowerState,
 )
-
-if TYPE_CHECKING:
-    from kbisect.remote.ssh import SSHClient
+from kbisect.remote.ssh import SSHClient
 
 
 logger = logging.getLogger(__name__)
@@ -57,9 +55,7 @@ class BeakerController(PowerController):
         """
         self.hostname = hostname
 
-    def _run_beaker_command(
-        self, action: str, timeout: int = DEFAULT_BEAKER_TIMEOUT
-    ) -> Tuple[int, str, str]:
+    def _run_beaker_command(self, action: str, timeout: int = DEFAULT_BEAKER_TIMEOUT) -> Tuple[int, str, str]:
         """Run bkr system-power command.
 
         Args:
@@ -84,9 +80,7 @@ class BeakerController(PowerController):
         ]
 
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, check=False
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
             return result.returncode, result.stdout, result.stderr
 
         except subprocess.TimeoutExpired as exc:
@@ -181,24 +175,26 @@ class BeakerController(PowerController):
         logger.info(f"✓ Power cycle complete for {self.hostname}")
         return True
 
-    def reset(self, ssh_client: Optional["SSHClient"] = None) -> bool:
+    def reset(self) -> bool:
         """Reset (hard reboot) the system.
 
-        Args:
-            ssh_client: Optional SSH client for connectivity verification.
-                       If provided, will wait for machine shutdown before returning.
+        Creates a temporary SSH connection to verify shutdown after sending
+        the reboot command. This handles the asynchronous nature of Beaker's
+        reboot process where the command returns before the actual reboot starts.
 
         Returns:
-            True if reset command succeeded (and shutdown confirmed if ssh_client provided),
+            True if reset command succeeded and shutdown confirmed,
             False otherwise
         """
         logger.info(f"Resetting system {self.hostname} via Beaker...")
 
+        # Create temporary SSH client for shutdown verification
+        ssh_client = SSHClient(self.hostname, user="root", connect_timeout=20)
+
         # Pre-reboot connectivity check
-        if ssh_client:
-            logger.info("Verifying SSH connectivity before reboot...")
-            if not ssh_client.is_alive():
-                logger.warning("SSH not responsive before reboot - machine may already be down")
+        logger.info("Verifying SSH connectivity before reboot...")
+        if not ssh_client.is_alive():
+            logger.warning("SSH not responsive before reboot - machine may already be down")
 
         # Send reboot command
         try:
@@ -213,28 +209,22 @@ class BeakerController(PowerController):
 
         logger.info(f"✓ Reset command sent for {self.hostname}")
 
-        # Wait for shutdown if SSH client provided
-        if ssh_client:
-            logger.info("Waiting for machine to shut down...")
-            shutdown_timeout = 120  # Fixed timeout to prevent infinite loop
-            shutdown_poll_interval = 2
-            start_time = time.time()
+        # Wait for shutdown
+        logger.info("Waiting for machine to shut down...")
+        shutdown_timeout = 120  # Fixed timeout to prevent infinite loop
+        shutdown_poll_interval = 2
+        start_time = time.time()
 
-            while time.time() - start_time < shutdown_timeout:
-                if not ssh_client.is_alive():
-                    elapsed = time.time() - start_time
-                    logger.info(f"✓ Machine shutdown confirmed after {elapsed:.1f}s")
-                    return True
-                time.sleep(shutdown_poll_interval)
+        while time.time() - start_time < shutdown_timeout:
+            if not ssh_client.is_alive():
+                elapsed = time.time() - start_time
+                logger.info(f"✓ Machine shutdown confirmed after {elapsed:.1f}s")
+                return True
+            time.sleep(shutdown_poll_interval)
 
-            # Timeout reached - shutdown not confirmed
-            logger.warning(
-                f"Shutdown not confirmed within {shutdown_timeout}s - "
-                "machine may still be up or reboot pending"
-            )
-            return False
-
-        return True
+        # Timeout reached - shutdown not confirmed
+        logger.warning(f"Shutdown not confirmed within {shutdown_timeout}s - machine may still be up or reboot pending")
+        return False
 
     def set_boot_device(self, device: BootDevice, persistent: bool = False) -> bool:
         """Set next boot device.
@@ -249,9 +239,7 @@ class BeakerController(PowerController):
         Returns:
             False (not supported)
         """
-        logger.warning(
-            f"Boot device configuration not supported by Beaker for {self.hostname}"
-        )
+        logger.warning(f"Boot device configuration not supported by Beaker for {self.hostname}")
         return False
 
     def get_boot_device(self) -> Optional[str]:
@@ -277,52 +265,43 @@ class BeakerController(PowerController):
         """
         import shutil
 
-        result = {
-            'healthy': False,
-            'checks': []
-        }
+        result = {"healthy": False, "checks": []}
 
         # Check if bkr is installed
-        bkr_path = shutil.which('bkr')
+        bkr_path = shutil.which("bkr")
         if not bkr_path:
-            result['error'] = "bkr command not found in PATH"
-            result['checks'].append({'name': 'bkr', 'passed': False})
+            result["error"] = "bkr command not found in PATH"
+            result["checks"].append({"name": "bkr", "passed": False})
             return result
 
-        result['tool_path'] = bkr_path
-        result['checks'].append({'name': 'bkr', 'passed': True})
+        result["tool_path"] = bkr_path
+        result["checks"].append({"name": "bkr", "passed": True})
 
         # Test Kerberos authentication with bkr whoami
         try:
-            whoami_result = subprocess.run(
-                ['bkr', 'whoami'],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False
-            )
+            whoami_result = subprocess.run(["bkr", "whoami"], capture_output=True, text=True, timeout=10, check=False)
 
             if whoami_result.returncode != 0:
-                result['error'] = f"Kerberos authentication failed: {whoami_result.stderr.strip()}"
-                result['checks'].append({'name': 'kerberos_auth', 'passed': False})
+                result["error"] = f"Kerberos authentication failed: {whoami_result.stderr.strip()}"
+                result["checks"].append({"name": "kerberos_auth", "passed": False})
                 return result
 
-            result['checks'].append({'name': 'kerberos_auth', 'passed': True})
-            result['authenticated_user'] = whoami_result.stdout.strip()
+            result["checks"].append({"name": "kerberos_auth", "passed": True})
+            result["authenticated_user"] = whoami_result.stdout.strip()
 
         except subprocess.TimeoutExpired:
-            result['error'] = "bkr whoami command timed out"
-            result['checks'].append({'name': 'kerberos_auth', 'passed': False})
+            result["error"] = "bkr whoami command timed out"
+            result["checks"].append({"name": "kerberos_auth", "passed": False})
             return result
         except Exception as e:
-            result['error'] = f"Failed to check Kerberos authentication: {str(e)}"
-            result['checks'].append({'name': 'kerberos_auth', 'passed': False})
+            result["error"] = f"Failed to check Kerberos authentication: {str(e)}"
+            result["checks"].append({"name": "kerberos_auth", "passed": False})
             return result
 
         # Note: We cannot test power status query as Beaker doesn't support it
         # We consider the controller healthy if bkr is available and user is authenticated
-        result['healthy'] = True
-        result['power_status'] = 'unknown (Beaker does not support status queries)'
+        result["healthy"] = True
+        result["power_status"] = "unknown (Beaker does not support status queries)"
 
         return result
 
