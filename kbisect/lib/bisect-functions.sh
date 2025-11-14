@@ -918,6 +918,9 @@ validate_kernel_repo() {
         return 1
     fi
 
+    # Configure git safe.directory to prevent dubious ownership errors
+    git config --global --add safe.directory "$repo_path" 2>/dev/null || true
+
     # Check if repository is accessible
     if ! git -C "$repo_path" rev-parse HEAD >/dev/null 2>&1; then
         echo "ERROR: Git repository is invalid or corrupted: $repo_path" >&2

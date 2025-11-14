@@ -267,9 +267,26 @@ class BisectMaster:
 
         # Resolve kernel config paths for each host and store local paths for transfer
         self._local_kernel_configs = {}  # Store mapping of host_id -> local_config_path for transfer
+
+        # First, validate global config if set
+        global_config_path = None
+        if self.config.kernel_config_file:
+            global_config_path = Path(self.config.kernel_config_file)
+            if not global_config_path.exists():
+                logger.error(f"Global kernel config file not found on master: {self.config.kernel_config_file}")
+                raise FileNotFoundError(f"Global kernel config file not found: {self.config.kernel_config_file}")
+            logger.debug(f"Global kernel config validated: {self.config.kernel_config_file}")
+
+        # Process each host's kernel config (per-host or fallback to global)
         for host_manager in self.host_managers:
             kernel_config_file = host_manager.config.kernel_config_file
-            # Only process if kernel_config_file is set
+
+            # If no per-host config, use global config
+            if not kernel_config_file and global_config_path:
+                kernel_config_file = str(global_config_path)
+                logger.debug(f"Host {host_manager.config.hostname} using global kernel config")
+
+            # Only process if kernel_config_file is set (either per-host or global)
             if kernel_config_file:
                 config_path = Path(kernel_config_file)
                 if config_path.exists():
@@ -562,6 +579,31 @@ class BisectMaster:
             subprocess.run(["rm", "-rf", temp_dir], check=False)
             return None
 
+    def _configure_git_safe_directory(self, host_manager: HostManager) -> bool:
+        """Configure git safe.directory for a host to prevent dubious ownership errors.
+
+        Args:
+            host_manager: Host manager for the target host
+
+        Returns:
+            True if configuration successful, False otherwise
+        """
+        kernel_path = host_manager.config.kernel_path
+        hostname = host_manager.config.hostname
+
+        logger.debug(f"Configuring git safe.directory on {hostname}...")
+        ret, _stdout, stderr = host_manager.ssh.run_command(
+            f"git config --global --add safe.directory {shlex.quote(kernel_path)}",
+            timeout=host_manager.ssh_connect_timeout
+        )
+
+        if ret != 0:
+            logger.error(f"Failed to configure git safe.directory on {hostname}: {stderr}")
+            return False
+
+        logger.debug(f"  ✓ Git safe.directory configured on {hostname}")
+        return True
+
     def _transfer_repo_to_hosts(self, local_repo_path: str) -> bool:
         """Transfer kernel repository from master to all hosts.
 
@@ -633,12 +675,8 @@ class BisectMaster:
                     logger.warning(f"  Failed to reset repository: {stderr}")
 
                 # Configure git safe.directory
-                ret, _stdout, stderr = host_manager.ssh.run_command(
-                    f"git config --global --add safe.directory {shlex.quote(kernel_path)}",
-                    timeout=host_manager.ssh_connect_timeout
-                )
-                if ret != 0:
-                    logger.warning(f"  Failed to configure git safe.directory: {stderr}")
+                if not self._configure_git_safe_directory(host_manager):
+                    logger.warning(f"  Failed to configure git safe.directory on {host_manager.config.hostname}")
 
                 logger.info(f"  ✓ Transfer successful")
 
@@ -717,6 +755,14 @@ class BisectMaster:
             ret, _stdout, stderr = hm.ssh.call_function("init_protection")
             if ret != 0:
                 logger.error(f"Failed to initialize protection on {hm.config.hostname}: {stderr}")
+                return False
+            logger.info(f"  ✓ {hm.config.hostname}")
+
+        # Configure git safe.directory on all hosts
+        logger.info("Configuring git safe.directory on all hosts...")
+        for hm in self.host_managers:
+            if not self._configure_git_safe_directory(hm):
+                logger.error(f"Failed to configure git safe.directory on {hm.config.hostname}")
                 return False
             logger.info(f"  ✓ {hm.config.hostname}")
 
@@ -930,12 +976,9 @@ class BisectMaster:
         hostname = host_manager.config.hostname
         logger.info(f"  [{hostname}] Building kernel for commit {commit_sha[:SHORT_COMMIT_LENGTH]}...")
 
-        # Determine kernel config source (use per-host config if set, otherwise fall back to global)
-        kernel_config = ""
-        if host_manager.config.kernel_config_file:
-            kernel_config = host_manager.config.kernel_config_file
-        elif self.config.kernel_config_file:
-            kernel_config = self.config.kernel_config_file
+        # Get kernel config path (already resolved to remote path during __init__)
+        # Both per-host and global configs are transferred and set in host_manager.config.kernel_config_file
+        kernel_config = host_manager.config.kernel_config_file or ""
 
         # Create initial log entry with header
         log_header = f"=== Build Kernel on {hostname}: {commit_sha[:SHORT_COMMIT_LENGTH]} ===\n"
