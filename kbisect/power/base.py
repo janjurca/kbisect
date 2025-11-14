@@ -106,6 +106,21 @@ class PowerController(ABC):
             Boot device string, or None if unable to determine
         """
 
+    @abstractmethod
+    def health_check(self) -> dict:
+        """Perform health check on power controller.
+
+        Validates that the power controller is properly configured and operational.
+        Checks tool availability, credentials, and connectivity.
+
+        Returns:
+            Dictionary with health check results:
+                - healthy (bool): Overall health status
+                - tool_path (str, optional): Path to power control tool
+                - power_status (str, optional): Current power status if queryable
+                - error (str, optional): Error message if unhealthy
+        """
+
     # Optional methods - implementations can provide these if supported
     def get_sensor_data(self) -> Optional[str]:
         """Get hardware sensor data (temperature, fans, voltage, etc.).

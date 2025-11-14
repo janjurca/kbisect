@@ -315,6 +315,55 @@ class IPMIController(PowerController):
 
         return None
 
+    def health_check(self) -> dict:
+        """Perform health check on IPMI controller.
+
+        Validates:
+        - ipmitool command availability
+        - Connection and authentication to IPMI interface
+        - Ability to query power status
+
+        Returns:
+            Dictionary with health check results
+        """
+        import shutil
+
+        result = {
+            'healthy': False,
+            'checks': []
+        }
+
+        # Check if ipmitool is installed
+        ipmitool_path = shutil.which('ipmitool')
+        if not ipmitool_path:
+            result['error'] = "ipmitool command not found in PATH"
+            result['checks'].append({'name': 'ipmitool', 'passed': False})
+            return result
+
+        result['tool_path'] = ipmitool_path
+        result['checks'].append({'name': 'ipmitool', 'passed': True})
+
+        # Test connection and credentials by querying power status
+        try:
+            power_state = self.get_power_status()
+
+            if power_state == PowerState.UNKNOWN:
+                result['error'] = "Could not determine power status (connection or authentication failed)"
+                result['checks'].append({'name': 'connectivity', 'passed': False})
+                return result
+
+            result['power_status'] = power_state.value
+            result['checks'].append({'name': 'connectivity', 'passed': True})
+            result['checks'].append({'name': 'authentication', 'passed': True})
+            result['healthy'] = True
+
+        except Exception as e:
+            result['error'] = f"Failed to communicate with IPMI interface: {str(e)}"
+            result['checks'].append({'name': 'connectivity', 'passed': False})
+            return result
+
+        return result
+
     def get_sensor_data(self) -> Optional[str]:
         """Get sensor data (temperature, fans, etc.).
 

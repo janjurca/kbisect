@@ -227,6 +227,68 @@ class BeakerController(PowerController):
         """
         return None
 
+    def health_check(self) -> dict:
+        """Perform health check on Beaker controller.
+
+        Validates:
+        - bkr command availability
+        - Kerberos authentication (via bkr whoami)
+        - System accessibility
+
+        Returns:
+            Dictionary with health check results
+        """
+        import shutil
+
+        result = {
+            'healthy': False,
+            'checks': []
+        }
+
+        # Check if bkr is installed
+        bkr_path = shutil.which('bkr')
+        if not bkr_path:
+            result['error'] = "bkr command not found in PATH"
+            result['checks'].append({'name': 'bkr', 'passed': False})
+            return result
+
+        result['tool_path'] = bkr_path
+        result['checks'].append({'name': 'bkr', 'passed': True})
+
+        # Test Kerberos authentication with bkr whoami
+        try:
+            whoami_result = subprocess.run(
+                ['bkr', 'whoami'],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False
+            )
+
+            if whoami_result.returncode != 0:
+                result['error'] = f"Kerberos authentication failed: {whoami_result.stderr.strip()}"
+                result['checks'].append({'name': 'kerberos_auth', 'passed': False})
+                return result
+
+            result['checks'].append({'name': 'kerberos_auth', 'passed': True})
+            result['authenticated_user'] = whoami_result.stdout.strip()
+
+        except subprocess.TimeoutExpired:
+            result['error'] = "bkr whoami command timed out"
+            result['checks'].append({'name': 'kerberos_auth', 'passed': False})
+            return result
+        except Exception as e:
+            result['error'] = f"Failed to check Kerberos authentication: {str(e)}"
+            result['checks'].append({'name': 'kerberos_auth', 'passed': False})
+            return result
+
+        # Note: We cannot test power status query as Beaker doesn't support it
+        # We consider the controller healthy if bkr is available and user is authenticated
+        result['healthy'] = True
+        result['power_status'] = 'unknown (Beaker does not support status queries)'
+
+        return result
+
 
 def main() -> int:
     """Test Beaker controller."""

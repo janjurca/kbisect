@@ -1234,8 +1234,9 @@ class StateManager:
         session = self.Session()
         try:
             stmt = (
-                select(BuildLog, Iteration)
+                select(BuildLog, Iteration, Host)
                 .join(Iteration, BuildLog.iteration_id == Iteration.iteration_id)
+                .outerjoin(Host, BuildLog.host_id == Host.host_id)
             )
 
             # Add filters
@@ -1249,7 +1250,7 @@ class StateManager:
             results = session.execute(stmt).all()
 
             logs = []
-            for build_log, iteration in results:
+            for build_log, iteration, host in results:
                 logs.append({
                     "log_id": build_log.log_id,
                     "iteration_id": build_log.iteration_id,
@@ -1259,6 +1260,7 @@ class StateManager:
                     "timestamp": build_log.timestamp,
                     "size_bytes": build_log.size_bytes,
                     "exit_code": build_log.exit_code,
+                    "hostname": host.hostname if host else None,
                     "status": (
                         "RUNNING" if build_log.exit_code is None
                         else ("SUCCESS" if build_log.exit_code == 0 else "FAILED")
@@ -1421,7 +1423,8 @@ class StateManager:
         session = self.Session()
         try:
             stmt = (
-                select(Metadata)
+                select(Metadata, Host)
+                .outerjoin(Host, Metadata.host_id == Host.host_id)
                 .where(Metadata.session_id == session_id)
                 .order_by(Metadata.collection_time)
             )
@@ -1429,10 +1432,10 @@ class StateManager:
             if collection_type:
                 stmt = stmt.where(Metadata.collection_type == collection_type)
 
-            results = session.execute(stmt).scalars().all()
+            results = session.execute(stmt).all()
 
             metadata_list = []
-            for meta in results:
+            for meta, host in results:
                 # Try to parse as JSON, otherwise use raw string
                 try:
                     metadata_content = json.loads(meta.data)
@@ -1445,6 +1448,7 @@ class StateManager:
                     "iteration_id": meta.iteration_id,
                     "collection_time": meta.collection_time,
                     "collection_type": meta.collection_type,
+                    "hostname": host.hostname if host else None,
                     "metadata": metadata_content,
                 })
 

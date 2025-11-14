@@ -15,6 +15,7 @@ from typing import Any, Dict
 import yaml
 
 from kbisect.core import BisectMaster, SlaveMonitor
+from kbisect.core.checker import SystemChecker
 from kbisect.core.orchestrator import BisectConfig, HostConfig
 from kbisect.deployment import SlaveDeployer
 from kbisect.persistence import StateManager
@@ -620,15 +621,16 @@ def _handle_logs_list(state: StateManager, args: argparse.Namespace) -> int:
         return 0
 
     print("=== Build Logs ===\n")
-    print(f"{'Log ID':<8} {'Iter':<6} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}")
-    print("-" * 80)
+    print(f"{'Log ID':<8} {'Iter':<6} {'Host':<15} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}")
+    print("-" * 100)
 
     for log in logs:
         size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
         timestamp = log["timestamp"][:19] if log["timestamp"] else "N/A"
+        hostname = log["hostname"] if log["hostname"] else "-"
         print(
             f"{log['log_id']:<8} {log['iteration_num']:<6} "
-            f"{log['commit_sha'][:7]:<9} {log['log_type']:<8} "
+            f"{hostname:<15} {log['commit_sha'][:7]:<9} {log['log_type']:<8} "
             f"{log['status']:<10} {size_kb:>7.1f} KB {timestamp:<20}"
         )
     return 0
@@ -850,16 +852,17 @@ def cmd_metadata(args: argparse.Namespace) -> int:
 
         print("=== Metadata ===\n")
         print(
-            f"{'ID':<6} {'Session':<8} {'Iteration':<10} {'Type':<12} {'Collection Time':<20}"
+            f"{'ID':<6} {'Session':<8} {'Iteration':<10} {'Host':<15} {'Type':<12} {'Collection Time':<20}"
         )
-        print("-" * 70)
+        print("-" * 85)
 
         for meta in metadata_list:
             iter_str = str(meta["iteration_id"]) if meta["iteration_id"] else "N/A"
             timestamp = meta["collection_time"][:19] if meta["collection_time"] else "N/A"
+            hostname = meta["hostname"] if meta["hostname"] else "N/A"
             print(
                 f"{meta['metadata_id']:<6} {meta['session_id']:<8} "
-                f"{iter_str:<10} {meta['collection_type']:<12} {timestamp:<20}"
+                f"{iter_str:<10} {hostname:<15} {meta['collection_type']:<12} {timestamp:<20}"
             )
 
     elif args.metadata_command == "show":
@@ -1055,6 +1058,51 @@ def cmd_init_config(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """Check system dependencies and configuration.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 if all checks passed, 1 if any check failed)
+    """
+    logger.info("Running system health checks...")
+
+    # Load configuration
+    try:
+        config_dict = load_config(args.config)
+    except SystemExit:
+        logger.error("Failed to load configuration file")
+        logger.error(f"Please ensure {args.config} exists and is valid YAML")
+        return 1
+
+    # Create BisectConfig object
+    try:
+        config = create_bisect_config(config_dict, args)
+    except SystemExit:
+        logger.error("Configuration validation failed")
+        return 1
+
+    # Create SystemChecker and run all checks
+    checker = SystemChecker(config)
+
+    try:
+        all_passed = checker.run_all_checks()
+        checker.print_results()
+
+        if all_passed:
+            logger.info("✓ All checks passed - system is ready for bisection")
+            return 0
+        else:
+            logger.error("✗ Some checks failed - please address issues before running bisection")
+            return 1
+
+    except Exception as exc:
+        logger.error(f"Error running system checks: {exc}", exc_info=True)
+        return 1
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create argument parser.
 
@@ -1137,6 +1185,9 @@ def create_parser() -> argparse.ArgumentParser:
     parser_init_config.add_argument(
         "--force", "-f", action="store_true", help="Overwrite existing file without prompting"
     )
+
+    # check command
+    subparsers.add_parser("check", help="Check system dependencies and configuration")
 
     # logs command
     parser_logs = subparsers.add_parser("logs", help="Manage build logs")
@@ -1243,6 +1294,8 @@ def main() -> int:
             return cmd_deploy(args)
         if args.command == "init-config":
             return cmd_init_config(args)
+        if args.command == "check":
+            return cmd_check(args)
         if args.command == "logs":
             return cmd_logs(args)
         if args.command == "metadata":
