@@ -265,6 +265,35 @@ class BisectMaster:
                 else:
                     logger.debug(f"Test script assumed to exist on remote host: {test_script}")
 
+        # Resolve kernel config paths for each host and store local paths for transfer
+        self._local_kernel_configs = {}  # Store mapping of host_id -> local_config_path for transfer
+        for host_manager in self.host_managers:
+            kernel_config_file = host_manager.config.kernel_config_file
+            # Only process if kernel_config_file is set and use_running_config is not enabled
+            if kernel_config_file and not host_manager.config.use_running_config:
+                config_path = Path(kernel_config_file)
+                if config_path.exists():
+                    # It's a local file on master - need to transfer it
+                    logger.debug(f"Kernel config is local file on master: {kernel_config_file}")
+                    bisect_base_dir = Path(host_manager.config.bisect_path).parent
+                    remote_config_dir = bisect_base_dir / "kernel-configs"
+                    remote_config_path = str(remote_config_dir / config_path.name)
+
+                    # Store local path for transfer during initialization
+                    self._local_kernel_configs[host_manager.host_id] = {
+                        'local_path': str(config_path),
+                        'remote_path': remote_config_path,
+                        'remote_dir': str(remote_config_dir)
+                    }
+
+                    # Update config to use remote path
+                    host_manager.config.kernel_config_file = remote_config_path
+                    logger.debug(f"Resolved kernel config to slave path: {remote_config_path}")
+                else:
+                    # File doesn't exist on master - this is an error since we expect it to be local
+                    logger.error(f"Kernel config file not found on master: {kernel_config_file}")
+                    raise FileNotFoundError(f"Kernel config file not found: {kernel_config_file}")
+
     def create_iteration_metadata_record(self, iteration_id: int) -> Optional[int]:
         """Create a minimal metadata record for an iteration.
 
@@ -739,6 +768,48 @@ class BisectMaster:
                         return False
                     except Exception as exc:
                         logger.error(f"Error transferring test script to {hm.config.hostname}: {exc}")
+                        return False
+
+        # Transfer kernel configs if they're local files
+        if self._local_kernel_configs:
+            logger.info("Transferring kernel configs to hosts...")
+            for hm in self.host_managers:
+                if hm.host_id in self._local_kernel_configs:
+                    config_info = self._local_kernel_configs[hm.host_id]
+                    local_path = config_info['local_path']
+                    remote_path = config_info['remote_path']
+                    remote_dir = config_info['remote_dir']
+
+                    # Create remote directory
+                    ret, _stdout, stderr = hm.ssh.run_command(
+                        f"mkdir -p {shlex.quote(remote_dir)}", timeout=hm.ssh_connect_timeout
+                    )
+                    if ret != 0:
+                        logger.error(f"Failed to create kernel config directory on {hm.config.hostname}: {stderr}")
+                        return False
+
+                    # Transfer config using SCP via subprocess
+                    try:
+                        scp_cmd = [
+                            "scp",
+                            "-o", "StrictHostKeyChecking=no",
+                            "-o", f"ConnectTimeout={hm.ssh_connect_timeout}",
+                            local_path,
+                            f"{hm.config.ssh_user}@{hm.config.hostname}:{remote_path}"
+                        ]
+                        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30, check=False)
+
+                        if result.returncode != 0:
+                            logger.error(f"Failed to transfer kernel config to {hm.config.hostname}: {result.stderr}")
+                            return False
+
+                        logger.info(f"  ✓ Transferred kernel config to {hm.config.hostname}: {remote_path}")
+
+                    except subprocess.TimeoutExpired:
+                        logger.error(f"Kernel config transfer to {hm.config.hostname} timed out")
+                        return False
+                    except Exception as exc:
+                        logger.error(f"Error transferring kernel config to {hm.config.hostname}: {exc}")
                         return False
 
         # Collect baseline metadata if enabled (use first host)

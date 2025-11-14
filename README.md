@@ -345,35 +345,41 @@ The report will show the **first bad commit** - the exact commit that introduced
 **Option 1: Use a specific config file**
 
 ```bash
-# Save your known-good config
+# Save your known-good config from slave to master
 scp root@<slave-ip>:/boot/config-$(uname -r) /tmp/my-config
 
-# Use it for bisection
-kbisect init v6.1 v6.6 --kernel-config /tmp/my-config
+# Configure it in bisect.yaml
+cat > bisect.yaml <<EOF
+kernel_config:
+  config_file: /tmp/my-config  # Path on master machine (will be transferred to slave)
+EOF
+
 kbisect start
 ```
 
 **Option 2: Use running kernel's config automatically**
 
-```bash
-kbisect init v6.1 v6.6 --use-running-config
-kbisect start
+```yaml
+# bisect.yaml
+kernel_config:
+  use_running_config: true  # Uses /boot/config-$(uname -r) from slave
 ```
 
-**Option 3: Set in config file** (applies to that bisection directory)
+**Option 3: Relative path in config file**
 
 ```yaml
 # bisect.yaml (in your bisection directory)
 kernel_config:
-  config_file: /root/baseline.config
-  # Or: use_running_config: true
+  config_file: my-baseline.config  # Relative to config file location
 ```
 
 **How it works:**
-1. Base `.config` is copied to kernel source
-2. `make olddefconfig` runs (handles new/removed options automatically)
-3. New options get default values (non-interactive - no prompts!)
-4. Kernel builds with consistent config
+1. Config file is read from **master machine**
+2. File is automatically transferred to slave during initialization
+3. Base `.config` is copied to kernel source on slave
+4. `make olddefconfig` runs (handles new/removed options automatically)
+5. New options get default values (non-interactive - no prompts!)
+6. Kernel builds with consistent config
 
 ### Running Custom Tests
 
@@ -598,11 +604,14 @@ disk_management:
 
 # Kernel configuration
 kernel_config:
-  # Path to base .config file (optional)
+  # Path to base .config file on master machine (optional)
+  # Can be absolute or relative to config file location
+  # File will be automatically transferred to slave during initialization
   # If not specified and use_running_config is false, kernel defaults are used
   config_file: null
 
   # Use running kernel's config as base (default: false)
+  # Uses /boot/config-$(uname -r) from slave machine
   # If both config_file and use_running_config are set, config_file takes precedence
   use_running_config: false
 
@@ -1426,17 +1435,22 @@ kbisect report
 ```bash
 # Problem: Need to test with specific kernel config (DEBUG options enabled)
 
-# 1. Create custom config
+# 1. Create custom config on master
 scp root@slave:/boot/config-$(uname -r) /tmp/debug.config
 vim /tmp/debug.config
 # Add: CONFIG_DEBUG_INFO=y
 #      CONFIG_DEBUG_KERNEL=y
 
-# 2. Run bisection with custom config
-kbisect init v6.1 v6.6 --kernel-config /tmp/debug.config
+# 2. Configure bisection to use custom config
+cat > bisect.yaml <<EOF
+kernel_config:
+  config_file: /tmp/debug.config  # Path on master (will be transferred to slave)
+EOF
+
+# 3. Run bisection
 kbisect start
 
-# 3. All kernels built with DEBUG config
+# 4. All kernels built with DEBUG config
 ```
 
 ---

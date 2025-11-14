@@ -89,6 +89,7 @@ class SystemChecker:
             ))
 
         # Check kernel config file if specified
+        # Note: kernel config file must be on master machine (it will be transferred to slave)
         if self.config.kernel_config_file:
             config_path = Path(self.config.kernel_config_file)
             if config_path.exists():
@@ -96,16 +97,26 @@ class SystemChecker:
                     category="Configuration",
                     name="kernel config file",
                     passed=True,
-                    message=f"Found at {self.config.kernel_config_file}"
+                    message=f"Found on master at {self.config.kernel_config_file}"
                 ))
             else:
-                results.append(CheckResult(
-                    category="Configuration",
-                    name="kernel config file",
-                    passed=True,
-                    message=f"File not found: {self.config.kernel_config_file}",
-                    warning=True
-                ))
+                # use_running_config takes precedence, so only error if not using running config
+                if not self.config.use_running_config:
+                    results.append(CheckResult(
+                        category="Configuration",
+                        name="kernel config file",
+                        passed=False,
+                        message=f"File not found on master: {self.config.kernel_config_file}"
+                    ))
+                else:
+                    # use_running_config is True, so kernel_config_file will be ignored anyway
+                    results.append(CheckResult(
+                        category="Configuration",
+                        name="kernel config file",
+                        passed=True,
+                        message=f"File not found but will be ignored (use_running_config=True)",
+                        warning=True
+                    ))
 
         # Check kernel repository if specified
         if self.config.kernel_repo_source:

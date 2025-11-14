@@ -76,6 +76,17 @@ def load_config(config_path: str) -> Dict[str, Any]:
             config_dict["test"]["script"] = str(resolved_path)
             logger.debug(f"Resolved test script path: {test_script} -> {resolved_path}")
 
+    # Resolve kernel config file path if it's relative
+    if config_dict.get("kernel_config", {}).get("config_file"):
+        kernel_config = config_dict["kernel_config"]["config_file"]
+        kernel_config_path = Path(kernel_config)
+
+        # Only resolve if it's not already absolute
+        if not kernel_config_path.is_absolute():
+            resolved_path = (config_dir / kernel_config_path).resolve()
+            config_dict["kernel_config"]["config_file"] = str(resolved_path)
+            logger.debug(f"Resolved kernel config path: {kernel_config} -> {resolved_path}")
+
     return config_dict
 
 
