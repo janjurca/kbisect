@@ -207,17 +207,17 @@ def cmd_init(args: argparse.Namespace) -> int:
 
         if not deployer.is_deployed():
             if auto_deploy or args.force_deploy:
-                print(f"  Host not configured. Deploying automatically...")
+                print("  Host not configured. Deploying automatically...")
                 if not deployer.deploy_full():
                     print(f"\n✗ Deployment failed for {host_name}!")
                     return 1
-                print(f"  ✓ Deployed successfully")
+                print("  ✓ Deployed successfully")
             else:
                 print(f"\n✗ Host {host_name} is not deployed and auto_deploy is disabled")
                 print("Run: kbisect deploy to deploy manually")
                 return 1
         else:
-            print(f"  ✓ Already deployed")
+            print("  ✓ Already deployed")
 
     print("\n✓ All hosts are deployed")
 
@@ -1007,7 +1007,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         if args.verify_only:
             # Just verify deployment
-            print(f"  Verifying deployment...")
+            print("  Verifying deployment...")
             if deployer.is_deployed():
                 print("  ✓ Deployed")
                 success, _checks = deployer.verify_deployment()
@@ -1019,7 +1019,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         elif args.update_only:
             # Update library only
-            print(f"  Updating library...")
+            print("  Updating library...")
             if deployer.update_library():
                 print("  ✓ Library updated")
             else:
@@ -1028,7 +1028,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         else:
             # Full deployment
-            print(f"  Deploying...")
+            print("  Deploying...")
             if deployer.deploy_full():
                 print("  ✓ Deployment successful")
             else:
