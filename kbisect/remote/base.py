@@ -39,9 +39,7 @@ class RemoteClient(ABC):
         self.user = user
 
     @abstractmethod
-    def run_command(
-        self, command: str, timeout: Optional[int] = None
-    ) -> Tuple[int, str, str]:
+    def run_command(self, command: str, timeout: Optional[int] = None) -> Tuple[int, str, str]:
         """Run command on remote host.
 
         Args:

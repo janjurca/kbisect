@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class CheckResult:
     """Result of a single check operation."""
+
     category: str
     name: str
     passed: bool
@@ -43,24 +44,28 @@ class SystemChecker:
             List of check results for local tools
         """
         results = []
-        required_tools = ['ssh', 'rsync', 'git', 'ping']
+        required_tools = ["ssh", "rsync", "git", "ping"]
 
         for tool in required_tools:
             tool_path = shutil.which(tool)
             if tool_path:
-                results.append(CheckResult(
-                    category="Local System",
-                    name=f"{tool} command",
-                    passed=True,
-                    message=f"Found at {tool_path}"
-                ))
+                results.append(
+                    CheckResult(
+                        category="Local System",
+                        name=f"{tool} command",
+                        passed=True,
+                        message=f"Found at {tool_path}",
+                    )
+                )
             else:
-                results.append(CheckResult(
-                    category="Local System",
-                    name=f"{tool} command",
-                    passed=False,
-                    message=f"{tool} not found in PATH"
-                ))
+                results.append(
+                    CheckResult(
+                        category="Local System",
+                        name=f"{tool} command",
+                        passed=False,
+                        message=f"{tool} not found in PATH",
+                    )
+                )
 
         return results
 
@@ -74,60 +79,72 @@ class SystemChecker:
 
         # Check hosts configuration
         if not self.config.hosts:
-            results.append(CheckResult(
-                category="Configuration",
-                name="hosts configuration",
-                passed=False,
-                message="No hosts defined in configuration"
-            ))
+            results.append(
+                CheckResult(
+                    category="Configuration",
+                    name="hosts configuration",
+                    passed=False,
+                    message="No hosts defined in configuration",
+                )
+            )
         else:
-            results.append(CheckResult(
-                category="Configuration",
-                name="hosts configuration",
-                passed=True,
-                message=f"{len(self.config.hosts)} host(s) configured"
-            ))
+            results.append(
+                CheckResult(
+                    category="Configuration",
+                    name="hosts configuration",
+                    passed=True,
+                    message=f"{len(self.config.hosts)} host(s) configured",
+                )
+            )
 
         # Check kernel config file if specified
         # Note: kernel config file must be on master machine (it will be transferred to slave)
         if self.config.kernel_config_file:
             config_path = Path(self.config.kernel_config_file)
             if config_path.exists():
-                results.append(CheckResult(
-                    category="Configuration",
-                    name="kernel config file",
-                    passed=True,
-                    message=f"Found on master at {self.config.kernel_config_file}"
-                ))
+                results.append(
+                    CheckResult(
+                        category="Configuration",
+                        name="kernel config file",
+                        passed=True,
+                        message=f"Found on master at {self.config.kernel_config_file}",
+                    )
+                )
             else:
-                results.append(CheckResult(
-                    category="Configuration",
-                    name="kernel config file",
-                    passed=False,
-                    message=f"File not found on master: {self.config.kernel_config_file}"
-                ))
+                results.append(
+                    CheckResult(
+                        category="Configuration",
+                        name="kernel config file",
+                        passed=False,
+                        message=f"File not found on master: {self.config.kernel_config_file}",
+                    )
+                )
 
         # Check kernel repository if specified
         if self.config.kernel_repo_source:
             source = self.config.kernel_repo_source
-            if not source.startswith(('http://', 'https://', 'git@', 'ssh://')):
+            if not source.startswith(("http://", "https://", "git@", "ssh://")):
                 # Local path
                 repo_path = Path(source)
                 if repo_path.exists():
-                    results.append(CheckResult(
-                        category="Configuration",
-                        name="kernel repository",
-                        passed=True,
-                        message=f"Local repository found at {source}"
-                    ))
+                    results.append(
+                        CheckResult(
+                            category="Configuration",
+                            name="kernel repository",
+                            passed=True,
+                            message=f"Local repository found at {source}",
+                        )
+                    )
                 else:
-                    results.append(CheckResult(
-                        category="Configuration",
-                        name="kernel repository",
-                        passed=True,
-                        message=f"Local path not found: {source}",
-                        warning=True
-                    ))
+                    results.append(
+                        CheckResult(
+                            category="Configuration",
+                            name="kernel repository",
+                            passed=True,
+                            message=f"Local path not found: {source}",
+                            warning=True,
+                        )
+                    )
 
         return results
 
@@ -147,33 +164,41 @@ class SystemChecker:
             ssh = SSHClient(
                 host=hostname,
                 user=host_config.ssh_user,
-                connect_timeout=self.config.ssh_connect_timeout
+                connect_timeout=self.config.ssh_connect_timeout,
             )
 
             # Try a simple command
-            returncode, stdout, _ = ssh.run_command('echo "kbisect-check"', timeout=self.config.ssh_connect_timeout)
+            returncode, stdout, _ = ssh.run_command(
+                'echo "kbisect-check"', timeout=self.config.ssh_connect_timeout
+            )
 
             if returncode == 0 and stdout.strip() == "kbisect-check":
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name="SSH connection",
-                    passed=True,
-                    message="Connection successful"
-                ))
+                results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name="SSH connection",
+                        passed=True,
+                        message="Connection successful",
+                    )
+                )
             else:
-                results.append(CheckResult(
+                results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name="SSH connection",
+                        passed=False,
+                        message=f"Command execution failed (rc={returncode})",
+                    )
+                )
+        except Exception as e:
+            results.append(
+                CheckResult(
                     category=f"Host: {hostname}",
                     name="SSH connection",
                     passed=False,
-                    message=f"Command execution failed (rc={returncode})"
-                ))
-        except Exception as e:
-            results.append(CheckResult(
-                category=f"Host: {hostname}",
-                name="SSH connection",
-                passed=False,
-                message=f"Connection failed: {str(e)}"
-            ))
+                    message=f"Connection failed: {str(e)}",
+                )
+            )
 
         return results
 
@@ -193,7 +218,7 @@ class SystemChecker:
             ssh = SSHClient(
                 host=hostname,
                 user=host_config.ssh_user,
-                connect_timeout=self.config.ssh_connect_timeout
+                connect_timeout=self.config.ssh_connect_timeout,
             )
 
             deployer = SlaveDeployer(ssh, self.config)
@@ -202,77 +227,95 @@ class SystemChecker:
             if deployer.is_deployed():
                 try:
                     deployer.verify_deployment()
-                    results.append(CheckResult(
+                    results.append(
+                        CheckResult(
+                            category=f"Host: {hostname}",
+                            name="slave deployment",
+                            passed=True,
+                            message="Deployment verified successfully",
+                        )
+                    )
+                except Exception as e:
+                    results.append(
+                        CheckResult(
+                            category=f"Host: {hostname}",
+                            name="slave deployment",
+                            passed=False,
+                            message=f"Deployment verification failed: {str(e)}",
+                        )
+                    )
+            else:
+                results.append(
+                    CheckResult(
                         category=f"Host: {hostname}",
                         name="slave deployment",
                         passed=True,
-                        message="Deployment verified successfully"
-                    ))
-                except Exception as e:
-                    results.append(CheckResult(
-                        category=f"Host: {hostname}",
-                        name="slave deployment",
-                        passed=False,
-                        message=f"Deployment verification failed: {str(e)}"
-                    ))
-            else:
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name="slave deployment",
-                    passed=True,
-                    message="Not deployed yet",
-                    warning=True
-                ))
+                        message="Not deployed yet",
+                        warning=True,
+                    )
+                )
 
             # Check remote tools
-            remote_tools = ['make', 'grubby']
+            remote_tools = ["make", "grubby"]
             for tool in remote_tools:
-                returncode, stdout, _ = ssh.run_command(f'which {tool}', timeout=self.config.ssh_connect_timeout)
+                returncode, stdout, _ = ssh.run_command(
+                    f"which {tool}", timeout=self.config.ssh_connect_timeout
+                )
                 if returncode == 0:
-                    results.append(CheckResult(
-                        category=f"Host: {hostname}",
-                        name=f"remote {tool}",
-                        passed=True,
-                        message=f"Found at {stdout.strip()}"
-                    ))
+                    results.append(
+                        CheckResult(
+                            category=f"Host: {hostname}",
+                            name=f"remote {tool}",
+                            passed=True,
+                            message=f"Found at {stdout.strip()}",
+                        )
+                    )
                 else:
-                    results.append(CheckResult(
-                        category=f"Host: {hostname}",
-                        name=f"remote {tool}",
-                        passed=True,
-                        message=f"{tool} not found",
-                        warning=True
-                    ))
+                    results.append(
+                        CheckResult(
+                            category=f"Host: {hostname}",
+                            name=f"remote {tool}",
+                            passed=True,
+                            message=f"{tool} not found",
+                            warning=True,
+                        )
+                    )
 
             # Check kernel path
             kernel_path = host_config.kernel_path
             returncode, stdout, _ = ssh.run_command(
                 f'test -d {kernel_path} && echo "exists" || echo "missing"',
-                timeout=self.config.ssh_connect_timeout
+                timeout=self.config.ssh_connect_timeout,
             )
             if returncode == 0 and stdout.strip() == "exists":
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name="kernel path",
-                    passed=True,
-                    message=f"Directory exists: {kernel_path}"
-                ))
+                results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name="kernel path",
+                        passed=True,
+                        message=f"Directory exists: {kernel_path}",
+                    )
+                )
             else:
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name="kernel path",
-                    passed=True,
-                    message=f"Directory not found: {kernel_path}",
-                    warning=True
-                ))
+                results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name="kernel path",
+                        passed=True,
+                        message=f"Directory not found: {kernel_path}",
+                        warning=True,
+                    )
+                )
 
         except Exception as e:
-            results.append(CheckResult(
-                category=f"Host: {hostname}",
-                name="slave checks",
-                passed=False,
-                message=f"Unable to perform slave checks: {str(e)}"
-            ))
+            results.append(
+                CheckResult(
+                    category=f"Host: {hostname}",
+                    name="slave checks",
+                    passed=False,
+                    message=f"Unable to perform slave checks: {str(e)}",
+                )
+            )
 
         return results
 
@@ -287,82 +330,94 @@ class SystemChecker:
         """
         results = []
         hostname = host_config.hostname
-        power_type = host_config.power_control_type or 'null'
+        power_type = host_config.power_control_type or "null"
 
-        if power_type == 'null':
-            results.append(CheckResult(
-                category=f"Host: {hostname}",
-                name="power control",
-                passed=True,
-                message="No power control configured",
-                warning=True
-            ))
+        if power_type == "null":
+            results.append(
+                CheckResult(
+                    category=f"Host: {hostname}",
+                    name="power control",
+                    passed=True,
+                    message="No power control configured",
+                    warning=True,
+                )
+            )
             return results
 
         try:
             # Create power controller instance based on type
             controller = None
-            if power_type == 'ipmi':
+            if power_type == "ipmi":
                 if host_config.ipmi_host and host_config.ipmi_user and host_config.ipmi_password:
                     from ..power import IPMIController
+
                     controller = IPMIController(
-                        host_config.ipmi_host,
-                        host_config.ipmi_user,
-                        host_config.ipmi_password
+                        host_config.ipmi_host, host_config.ipmi_user, host_config.ipmi_password
                     )
                 else:
-                    results.append(CheckResult(
-                        category=f"Host: {hostname}",
-                        name="IPMI power control",
-                        passed=False,
-                        message="IPMI credentials incomplete (need ipmi_host, ipmi_user, ipmi_password)"
-                    ))
+                    results.append(
+                        CheckResult(
+                            category=f"Host: {hostname}",
+                            name="IPMI power control",
+                            passed=False,
+                            message="IPMI credentials incomplete (need ipmi_host, ipmi_user, ipmi_password)",
+                        )
+                    )
                     return results
-            elif power_type == 'beaker':
+            elif power_type == "beaker":
                 from ..power import BeakerController
+
                 controller = BeakerController(host_config.hostname)
             else:
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name="power control",
-                    passed=False,
-                    message=f"Unknown power control type: {power_type}"
-                ))
+                results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name="power control",
+                        passed=False,
+                        message=f"Unknown power control type: {power_type}",
+                    )
+                )
                 return results
 
             # Run health check
             health_result = controller.health_check()
 
-            if health_result['healthy']:
+            if health_result["healthy"]:
                 details = []
-                if 'tool_path' in health_result:
+                if "tool_path" in health_result:
                     details.append(f"Tool: {health_result['tool_path']}")
-                if 'power_status' in health_result:
+                if "power_status" in health_result:
                     details.append(f"Power status: {health_result['power_status']}")
 
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name=f"{power_type.upper()} power control",
-                    passed=True,
-                    message="Operational",
-                    details=", ".join(details) if details else None
-                ))
+                results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name=f"{power_type.upper()} power control",
+                        passed=True,
+                        message="Operational",
+                        details=", ".join(details) if details else None,
+                    )
+                )
             else:
-                error_msg = health_result.get('error', 'Unknown error')
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name=f"{power_type.upper()} power control",
-                    passed=False,
-                    message=f"Health check failed: {error_msg}"
-                ))
+                error_msg = health_result.get("error", "Unknown error")
+                results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name=f"{power_type.upper()} power control",
+                        passed=False,
+                        message=f"Health check failed: {error_msg}",
+                    )
+                )
 
         except Exception as e:
-            results.append(CheckResult(
-                category=f"Host: {hostname}",
-                name=f"{power_type} power control",
-                passed=False,
-                message=f"Failed to initialize: {str(e)}"
-            ))
+            results.append(
+                CheckResult(
+                    category=f"Host: {hostname}",
+                    name=f"{power_type} power control",
+                    passed=False,
+                    message=f"Failed to initialize: {str(e)}",
+                )
+            )
 
         return results
 
@@ -384,32 +439,38 @@ class SystemChecker:
 
         collector_type = self.config.console_collector_type
 
-        if collector_type in ['conserver', 'auto']:
+        if collector_type in ["conserver", "auto"]:
             # Check for console command
-            console_path = shutil.which('console')
+            console_path = shutil.which("console")
             if console_path:
-                results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name="conserver collector",
-                    passed=True,
-                    message=f"console command found at {console_path}"
-                ))
-            else:
-                if collector_type == 'conserver':
-                    results.append(CheckResult(
-                        category=f"Host: {hostname}",
-                        name="conserver collector",
-                        passed=False,
-                        message="console command not found"
-                    ))
-                else:
-                    results.append(CheckResult(
+                results.append(
+                    CheckResult(
                         category=f"Host: {hostname}",
                         name="conserver collector",
                         passed=True,
-                        message="console not found (will fallback to IPMI)",
-                        warning=True
-                    ))
+                        message=f"console command found at {console_path}",
+                    )
+                )
+            else:
+                if collector_type == "conserver":
+                    results.append(
+                        CheckResult(
+                            category=f"Host: {hostname}",
+                            name="conserver collector",
+                            passed=False,
+                            message="console command not found",
+                        )
+                    )
+                else:
+                    results.append(
+                        CheckResult(
+                            category=f"Host: {hostname}",
+                            name="conserver collector",
+                            passed=True,
+                            message="console not found (will fallback to IPMI)",
+                            warning=True,
+                        )
+                    )
 
         return results
 
@@ -431,7 +492,7 @@ class SystemChecker:
 
         # Per-host checks
         for host_config in self.config.hosts:
-            hostname = host_config['hostname']
+            hostname = host_config["hostname"]
             logger.info(f"Checking host: {hostname}")
 
             # SSH connectivity
@@ -440,13 +501,15 @@ class SystemChecker:
 
             # If SSH failed, skip remaining checks for this host
             if ssh_results and not ssh_results[0].passed:
-                self.results.append(CheckResult(
-                    category=f"Host: {hostname}",
-                    name="remaining checks",
-                    passed=True,
-                    message="Skipped due to SSH connection failure",
-                    warning=True
-                ))
+                self.results.append(
+                    CheckResult(
+                        category=f"Host: {hostname}",
+                        name="remaining checks",
+                        passed=True,
+                        message="Skipped due to SSH connection failure",
+                        warning=True,
+                    )
+                )
                 continue
 
             # Slave deployment
@@ -501,4 +564,6 @@ class SystemChecker:
         print(f"Summary: {passed} passed, {failed} failed, {warnings} warning(s)")
 
         if failed > 0:
-            print("\n⚠ Some checks failed. Please address the issues above before running bisection.")
+            print(
+                "\n⚠ Some checks failed. Please address the issues above before running bisection."
+            )

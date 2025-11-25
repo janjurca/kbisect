@@ -60,7 +60,9 @@ class SSHClient(RemoteClient):
         ]
 
         try:
-            result = subprocess.run(ssh_command, capture_output=True, text=True, timeout=timeout, check=False)
+            result = subprocess.run(
+                ssh_command, capture_output=True, text=True, timeout=timeout, check=False
+            )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
             logger.error(f"SSH command timed out after {timeout}s")

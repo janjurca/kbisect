@@ -60,7 +60,9 @@ class SlaveMonitor:
         connect_timeout: SSH connection timeout in seconds
     """
 
-    def __init__(self, slave_host: str, slave_user: str = "root", connect_timeout: int = 15) -> None:
+    def __init__(
+        self, slave_host: str, slave_user: str = "root", connect_timeout: int = 15
+    ) -> None:
         """Initialize slave monitor.
 
         Args:

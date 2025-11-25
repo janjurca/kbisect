@@ -141,9 +141,11 @@ class IPMIController(PowerController):
                 if not deleted:
                     # Last resort: try to zero out the file content
                     try:
-                        with open(password_file, 'w') as f:
-                            f.write('')
-                        logger.warning(f"Zeroed out password file {password_file} but could not delete it")
+                        with open(password_file, "w") as f:
+                            f.write("")
+                        logger.warning(
+                            f"Zeroed out password file {password_file} but could not delete it"
+                        )
                     except Exception as zero_exc:
                         logger.error(f"Failed to zero out password file: {zero_exc}")
 
@@ -298,9 +300,7 @@ class IPMIController(PowerController):
             Boot device name or None if unable to determine
         """
         try:
-            ret, stdout, stderr = self._run_ipmi_command(
-                ["chassis", "bootparam", "get", "5"]
-            )
+            ret, stdout, stderr = self._run_ipmi_command(["chassis", "bootparam", "get", "5"])
         except IPMIError:
             return None
 
@@ -328,38 +328,37 @@ class IPMIController(PowerController):
         """
         import shutil
 
-        result = {
-            'healthy': False,
-            'checks': []
-        }
+        result = {"healthy": False, "checks": []}
 
         # Check if ipmitool is installed
-        ipmitool_path = shutil.which('ipmitool')
+        ipmitool_path = shutil.which("ipmitool")
         if not ipmitool_path:
-            result['error'] = "ipmitool command not found in PATH"
-            result['checks'].append({'name': 'ipmitool', 'passed': False})
+            result["error"] = "ipmitool command not found in PATH"
+            result["checks"].append({"name": "ipmitool", "passed": False})
             return result
 
-        result['tool_path'] = ipmitool_path
-        result['checks'].append({'name': 'ipmitool', 'passed': True})
+        result["tool_path"] = ipmitool_path
+        result["checks"].append({"name": "ipmitool", "passed": True})
 
         # Test connection and credentials by querying power status
         try:
             power_state = self.get_power_status()
 
             if power_state == PowerState.UNKNOWN:
-                result['error'] = "Could not determine power status (connection or authentication failed)"
-                result['checks'].append({'name': 'connectivity', 'passed': False})
+                result["error"] = (
+                    "Could not determine power status (connection or authentication failed)"
+                )
+                result["checks"].append({"name": "connectivity", "passed": False})
                 return result
 
-            result['power_status'] = power_state.value
-            result['checks'].append({'name': 'connectivity', 'passed': True})
-            result['checks'].append({'name': 'authentication', 'passed': True})
-            result['healthy'] = True
+            result["power_status"] = power_state.value
+            result["checks"].append({"name": "connectivity", "passed": True})
+            result["checks"].append({"name": "authentication", "passed": True})
+            result["healthy"] = True
 
         except Exception as e:
-            result['error'] = f"Failed to communicate with IPMI interface: {str(e)}"
-            result['checks'].append({'name': 'connectivity', 'passed': False})
+            result["error"] = f"Failed to communicate with IPMI interface: {str(e)}"
+            result["checks"].append({"name": "connectivity", "passed": False})
             return result
 
         return result
@@ -391,9 +390,7 @@ class IPMIController(PowerController):
             SEL log content or None if unable to retrieve
         """
         try:
-            ret, stdout, stderr = self._run_ipmi_command(
-                ["sel", "list", "last", str(lines)]
-            )
+            ret, stdout, stderr = self._run_ipmi_command(["sel", "list", "last", str(lines)])
         except IPMIError:
             return None
 
@@ -440,9 +437,7 @@ class IPMIController(PowerController):
             time.sleep(1)
 
             # Activate SOL
-            ret, stdout, stderr = self._run_ipmi_command(
-                ["sol", "activate"], timeout=duration
-            )
+            ret, stdout, stderr = self._run_ipmi_command(["sol", "activate"], timeout=duration)
 
             return stdout
 

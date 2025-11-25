@@ -81,11 +81,6 @@ ignore = [
     "E501",   # line too long (handled by formatter)
     "B008",   # do not perform function calls in argument defaults
     "UP007",  # Use X | Y for type annotations (keep Optional for older Python)
-    "R0915",  # Too many statements in function (complex functions are sometimes necessary)
-    "R0914",  # Too many local variables (sometimes necessary for complex functions)
-    "R0913",  # Too many arguments (sometimes necessary for complex functions)
-    "C0301",  # line too long (handled by formatter)
-    "W1203",  # use lazy % formatting in logging functions (dont want to)
 ]
 
 [tool.ruff.lint.per-file-ignores]

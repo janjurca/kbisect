@@ -201,7 +201,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         deploy_path = host_dict.get("bisect_path", "/root/kernel-bisect/lib")
 
         print(f"\n[{i}/{len(config_dict['hosts'])}] Checking host: {host_name}")
-        deployer = SlaveDeployer(host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout)
+        deployer = SlaveDeployer(
+            host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout
+        )
 
         if not deployer.is_deployed():
             if auto_deploy or args.force_deploy:
@@ -241,11 +243,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 1
 
 
-def _resume_session(
-    session,
-    state: StateManager,
-    config_dict: dict
-) -> bool:
+def _resume_session(session, state: StateManager, config_dict: dict) -> bool:
     """Resume a halted bisection session.
 
     Args:
@@ -318,7 +316,10 @@ def _resume_session(
             print(f"Marking pending commit {last_iteration.commit_sha[:7]}...")
 
             # Determine what to mark based on error message
-            if "Boot timeout" in last_iteration.error_message or "Kernel panic" in last_iteration.error_message:
+            if (
+                "Boot timeout" in last_iteration.error_message
+                or "Kernel panic" in last_iteration.error_message
+            ):
                 # Determine mark type based on original test type
                 test_type = config_dict.get("test", {}).get("type", "boot")
                 if test_type == "boot":
@@ -326,11 +327,13 @@ def _resume_session(
                     print("  Boot test mode: marking as BAD")
                 else:
                     mark_as = "skip"
-                    print("  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)")
+                    print(
+                        "  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)"
+                    )
 
                 # Mark the commit via SSH (use first host since all share git state)
                 first_host_name, first_ssh, first_host_dict = ssh_clients[0]
-                kernel_path = first_host_dict.get('kernel_path', '/root/kernel')
+                kernel_path = first_host_dict.get("kernel_path", "/root/kernel")
                 mark_cmd = f"cd {kernel_path} && git bisect {mark_as}"
                 ret, _, stderr = first_ssh.run_command(mark_cmd, timeout=first_ssh.connect_timeout)
 
@@ -340,7 +343,9 @@ def _resume_session(
                     state.update_iteration(
                         last_iteration.iteration_id,
                         final_result=mark_as,
-                        error_message=last_iteration.error_message.replace(" (git mark pending - slave down)", "")
+                        error_message=last_iteration.error_message.replace(
+                            " (git mark pending - slave down)", ""
+                        ),
                     )
                 else:
                     print(f"✗ Failed to mark commit: {stderr}")
@@ -569,7 +574,11 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
     # Collect all hosts with IPMI configured
     ipmi_hosts = []
     for i, host_dict in enumerate(config_dict["hosts"]):
-        if host_dict.get("ipmi_host") and host_dict.get("ipmi_user") and host_dict.get("ipmi_password"):
+        if (
+            host_dict.get("ipmi_host")
+            and host_dict.get("ipmi_user")
+            and host_dict.get("ipmi_password")
+        ):
             ipmi_hosts.append((i, host_dict))
 
     if not ipmi_hosts:
@@ -631,7 +640,9 @@ def _handle_logs_list(state: StateManager, args: argparse.Namespace) -> int:
         return 0
 
     print("=== Build Logs ===\n")
-    print(f"{'Log ID':<8} {'Iter':<6} {'Host':<15} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}")
+    print(
+        f"{'Log ID':<8} {'Iter':<6} {'Host':<15} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}"
+    )
     print("-" * 100)
 
     for log in logs:
@@ -659,7 +670,7 @@ def _handle_logs_show(state: StateManager, args: argparse.Namespace) -> int:
     print(f"Commit:        {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
     print(f"Type:          {log_data['log_type']}")
     print(f"Exit code:     {log_data['exit_code']}")
-    size_kb = log_data['size_bytes'] / 1024 if log_data.get('size_bytes') else 0
+    size_kb = log_data["size_bytes"] / 1024 if log_data.get("size_bytes") else 0
     print(f"Size:          {size_kb:.1f} KB (compressed)")
     print(f"Timestamp:     {log_data['timestamp']}")
     print("\n" + "=" * 80 + "\n")
@@ -700,7 +711,8 @@ def _handle_logs_iteration(state: StateManager, args: argparse.Namespace) -> int
     for log in logs:
         size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
         exit_status = (
-            "RUNNING" if log["exit_code"] is None
+            "RUNNING"
+            if log["exit_code"] is None
             else ("SUCCESS" if log["exit_code"] == 0 else "FAILED")
         )
         print(f"  Log ID {log['log_id']}: {log['log_type']} - {exit_status} ({size_kb:.1f} KB)")
@@ -748,8 +760,8 @@ def _handle_logs_tail(state: StateManager, args: argparse.Namespace) -> int:
     print(f"Type:      {log_data['log_type']}")
     print(f"Iteration: {log_data['iteration_num']}")
     print(f"Commit:    {log_data['commit_sha'][:7]} - {log_data['commit_message'][:50]}")
-    if log_data['exit_code'] is not None:
-        exit_status = "SUCCESS" if log_data['exit_code'] == 0 else "FAILED"
+    if log_data["exit_code"] is not None:
+        exit_status = "SUCCESS" if log_data["exit_code"] == 0 else "FAILED"
         print(f"Status:    {exit_status} (already completed)")
     else:
         print("Status:    IN PROGRESS")
@@ -762,7 +774,7 @@ def _handle_logs_tail(state: StateManager, args: argparse.Namespace) -> int:
     last_length = len(log_data["content"])
 
     # If already finalized, no need to poll
-    if log_data['exit_code'] is not None:
+    if log_data["exit_code"] is not None:
         print(f"\n\n[Log already finalized with exit code: {log_data['exit_code']}]")
         return 0
 
@@ -892,6 +904,7 @@ def cmd_metadata(args: argparse.Namespace) -> int:
 
         # Display metadata content
         import json
+
         metadata_content = metadata["metadata"]
 
         # If metadata is a dict, pretty print as JSON
@@ -935,7 +948,9 @@ def cmd_metadata(args: argparse.Namespace) -> int:
             print(f"Metadata {args.metadata_id} not found")
             return 1
 
-        output_path = Path(args.output) if args.output else Path(f"metadata-{args.metadata_id}.json")
+        output_path = (
+            Path(args.output) if args.output else Path(f"metadata-{args.metadata_id}.json")
+        )
 
         try:
             import json
@@ -945,6 +960,7 @@ def cmd_metadata(args: argparse.Namespace) -> int:
                     json.dump(metadata["metadata"], f, indent=2)
                 else:  # yaml
                     import yaml
+
                     yaml.dump(metadata["metadata"], f, default_flow_style=False)
 
             print(f"Metadata {args.metadata_id} exported to: {output_path}")
@@ -985,7 +1001,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         print(f"[{i}/{len(config_dict['hosts'])}] Host: {host_name}")
 
-        deployer = SlaveDeployer(host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout)
+        deployer = SlaveDeployer(
+            host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout
+        )
 
         if args.verify_only:
             # Just verify deployment
@@ -1161,12 +1179,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     # monitor command
     parser_monitor = subparsers.add_parser("monitor", help="Monitor slave health")
-    parser_monitor.add_argument(
-        "--continuous", action="store_true", help="Continuous monitoring"
-    )
-    parser_monitor.add_argument(
-        "--interval", type=int, default=5, help="Check interval in seconds"
-    )
+    parser_monitor.add_argument("--continuous", action="store_true", help="Continuous monitoring")
+    parser_monitor.add_argument("--interval", type=int, default=5, help="Check interval in seconds")
 
     # ipmi command
     parser_ipmi = subparsers.add_parser("ipmi", help="IPMI control")

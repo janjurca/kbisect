@@ -57,7 +57,9 @@ class BeakerController(PowerController):
         self.hostname = hostname
         self.ssh_connect_timeout = ssh_connect_timeout
 
-    def _run_beaker_command(self, action: str, timeout: int = DEFAULT_BEAKER_TIMEOUT) -> Tuple[int, str, str]:
+    def _run_beaker_command(
+        self, action: str, timeout: int = DEFAULT_BEAKER_TIMEOUT
+    ) -> Tuple[int, str, str]:
         """Run bkr system-power command.
 
         Args:
@@ -82,7 +84,9 @@ class BeakerController(PowerController):
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False
+            )
             return result.returncode, result.stdout, result.stderr
 
         except subprocess.TimeoutExpired as exc:
@@ -225,7 +229,9 @@ class BeakerController(PowerController):
             time.sleep(shutdown_poll_interval)
 
         # Timeout reached - shutdown not confirmed
-        logger.warning(f"Shutdown not confirmed within {shutdown_timeout}s - machine may still be up or reboot pending")
+        logger.warning(
+            f"Shutdown not confirmed within {shutdown_timeout}s - machine may still be up or reboot pending"
+        )
         return False
 
     def set_boot_device(self, device: BootDevice, persistent: bool = False) -> bool:
@@ -281,7 +287,9 @@ class BeakerController(PowerController):
 
         # Test Kerberos authentication with bkr whoami
         try:
-            whoami_result = subprocess.run(["bkr", "whoami"], capture_output=True, text=True, timeout=10, check=False)
+            whoami_result = subprocess.run(
+                ["bkr", "whoami"], capture_output=True, text=True, timeout=10, check=False
+            )
 
             if whoami_result.returncode != 0:
                 result["error"] = f"Kerberos authentication failed: {whoami_result.stderr.strip()}"

@@ -37,6 +37,7 @@ def create_console_collector(
     try:
         # Test if conserver is available
         import subprocess
+
         result = subprocess.run(
             ["which", "console"],
             capture_output=True,

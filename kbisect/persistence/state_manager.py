@@ -171,7 +171,9 @@ class StateManager:
             logs_columns = [col[1] for col in cursor.fetchall()]
             if "host_id" not in logs_columns:
                 logger.info("Adding host_id column to logs table")
-                cursor.execute("ALTER TABLE logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)")
+                cursor.execute(
+                    "ALTER TABLE logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)"
+                )
                 conn.commit()
 
             # Migration: Add host_id to build_logs table
@@ -179,7 +181,9 @@ class StateManager:
             build_logs_columns = [col[1] for col in cursor.fetchall()]
             if "host_id" not in build_logs_columns:
                 logger.info("Adding host_id column to build_logs table")
-                cursor.execute("ALTER TABLE build_logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)")
+                cursor.execute(
+                    "ALTER TABLE build_logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)"
+                )
                 conn.commit()
 
             # Migration: Add host_id to metadata table
@@ -187,7 +191,9 @@ class StateManager:
             metadata_columns = [col[1] for col in cursor.fetchall()]
             if "host_id" not in metadata_columns:
                 logger.info("Adding host_id column to metadata table")
-                cursor.execute("ALTER TABLE metadata ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)")
+                cursor.execute(
+                    "ALTER TABLE metadata ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)"
+                )
                 conn.commit()
 
         except Exception as exc:
@@ -759,10 +765,7 @@ class StateManager:
         finally:
             session.close()
 
-    def create_iteration_results_bulk(
-        self,
-        results: List[Dict[str, Any]]
-    ) -> List[int]:
+    def create_iteration_results_bulk(self, results: List[Dict[str, Any]]) -> List[int]:
         """Create multiple per-host iteration results in a single transaction.
 
         Args:
@@ -789,15 +792,15 @@ class StateManager:
 
             for result_data in results:
                 new_result = IterationResult(
-                    iteration_id=result_data['iteration_id'],
-                    host_id=result_data['host_id'],
-                    build_result=result_data.get('build_result'),
-                    boot_result=result_data.get('boot_result'),
-                    test_result=result_data.get('test_result'),
-                    final_result=result_data.get('final_result'),
+                    iteration_id=result_data["iteration_id"],
+                    host_id=result_data["host_id"],
+                    build_result=result_data.get("build_result"),
+                    boot_result=result_data.get("boot_result"),
+                    test_result=result_data.get("test_result"),
+                    final_result=result_data.get("final_result"),
                     timestamp=current_timestamp,
-                    error_message=result_data.get('error_message'),
-                    test_output=result_data.get('test_output'),
+                    error_message=result_data.get("error_message"),
+                    test_output=result_data.get("test_output"),
                 )
                 session.add(new_result)
 
@@ -903,7 +906,9 @@ class StateManager:
         finally:
             session.close()
 
-    def add_log(self, iteration_id: int, log_type: str, message: str, host_id: Optional[int] = None) -> None:
+    def add_log(
+        self, iteration_id: int, log_type: str, message: str, host_id: Optional[int] = None
+    ) -> None:
         """Add log entry for an iteration.
 
         Args:
@@ -947,11 +952,7 @@ class StateManager:
         """
         session = self.Session()
         try:
-            stmt = (
-                select(Log)
-                .where(Log.iteration_id == iteration_id)
-                .order_by(Log.timestamp)
-            )
+            stmt = select(Log).where(Log.iteration_id == iteration_id).order_by(Log.timestamp)
             results = session.execute(stmt).scalars().all()
 
             return [
@@ -968,7 +969,11 @@ class StateManager:
             session.close()
 
     def create_build_log(
-        self, iteration_id: int, log_type: str, initial_content: str = "", host_id: Optional[int] = None
+        self,
+        iteration_id: int,
+        log_type: str,
+        initial_content: str = "",
+        host_id: Optional[int] = None,
     ) -> int:
         """Create initial build log entry for streaming.
 
@@ -987,7 +992,9 @@ class StateManager:
         session = self.Session()
         try:
             # Compress initial content if provided
-            compressed_content = gzip.compress(initial_content.encode("utf-8")) if initial_content else b""
+            compressed_content = (
+                gzip.compress(initial_content.encode("utf-8")) if initial_content else b""
+            )
             size_bytes = len(compressed_content)
 
             new_log = BuildLog(
@@ -1016,9 +1023,7 @@ class StateManager:
         finally:
             session.close()
 
-    def append_build_log_chunk(
-        self, log_id: int, chunk: str
-    ) -> None:
+    def append_build_log_chunk(self, log_id: int, chunk: str) -> None:
         """Append content to existing build log.
 
         Args:
@@ -1041,7 +1046,9 @@ class StateManager:
             if build_log.compressed and build_log.log_content:
                 existing_content = gzip.decompress(build_log.log_content).decode("utf-8")
             else:
-                existing_content = build_log.log_content.decode("utf-8") if build_log.log_content else ""
+                existing_content = (
+                    build_log.log_content.decode("utf-8") if build_log.log_content else ""
+                )
 
             # Append new chunk
             updated_content = existing_content + chunk
@@ -1052,7 +1059,9 @@ class StateManager:
             build_log.size_bytes = len(compressed_content)
 
             session.commit()
-            logger.debug(f"Appended {len(chunk)} bytes to log {log_id} (total compressed: {len(compressed_content)} bytes)")
+            logger.debug(
+                f"Appended {len(chunk)} bytes to log {log_id} (total compressed: {len(compressed_content)} bytes)"
+            )
 
         except Exception as exc:
             session.rollback()
@@ -1062,9 +1071,7 @@ class StateManager:
         finally:
             session.close()
 
-    def finalize_build_log(
-        self, log_id: int, exit_code: int
-    ) -> None:
+    def finalize_build_log(self, log_id: int, exit_code: int) -> None:
         """Finalize build log with exit code.
 
         Args:
@@ -1251,21 +1258,24 @@ class StateManager:
 
             logs = []
             for build_log, iteration, host in results:
-                logs.append({
-                    "log_id": build_log.log_id,
-                    "iteration_id": build_log.iteration_id,
-                    "iteration_num": iteration.iteration_num,
-                    "commit_sha": iteration.commit_sha,
-                    "log_type": build_log.log_type,
-                    "timestamp": build_log.timestamp,
-                    "size_bytes": build_log.size_bytes,
-                    "exit_code": build_log.exit_code,
-                    "hostname": host.hostname if host else None,
-                    "status": (
-                        "RUNNING" if build_log.exit_code is None
-                        else ("SUCCESS" if build_log.exit_code == 0 else "FAILED")
-                    ),
-                })
+                logs.append(
+                    {
+                        "log_id": build_log.log_id,
+                        "iteration_id": build_log.iteration_id,
+                        "iteration_num": iteration.iteration_num,
+                        "commit_sha": iteration.commit_sha,
+                        "log_type": build_log.log_type,
+                        "timestamp": build_log.timestamp,
+                        "size_bytes": build_log.size_bytes,
+                        "exit_code": build_log.exit_code,
+                        "hostname": host.hostname if host else None,
+                        "status": (
+                            "RUNNING"
+                            if build_log.exit_code is None
+                            else ("SUCCESS" if build_log.exit_code == 0 else "FAILED")
+                        ),
+                    }
+                )
 
             return logs
         finally:
@@ -1442,15 +1452,17 @@ class StateManager:
                 except (json.JSONDecodeError, ValueError):
                     metadata_content = meta.data
 
-                metadata_list.append({
-                    "metadata_id": meta.metadata_id,
-                    "session_id": meta.session_id,
-                    "iteration_id": meta.iteration_id,
-                    "collection_time": meta.collection_time,
-                    "collection_type": meta.collection_type,
-                    "hostname": host.hostname if host else None,
-                    "metadata": metadata_content,
-                })
+                metadata_list.append(
+                    {
+                        "metadata_id": meta.metadata_id,
+                        "session_id": meta.session_id,
+                        "iteration_id": meta.iteration_id,
+                        "collection_time": meta.collection_time,
+                        "collection_type": meta.collection_type,
+                        "hostname": host.hostname if host else None,
+                        "metadata": metadata_content,
+                    }
+                )
 
             return metadata_list
         finally:

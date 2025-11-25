@@ -132,7 +132,9 @@ class SlaveDeployer:
                 f"{self.slave_user}@{self.slave_host}:{remote_path}",
             ]
 
-            result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=60, check=False)
+            result = subprocess.run(
+                rsync_cmd, capture_output=True, text=True, timeout=60, check=False
+            )
             if result.returncode == 0:
                 return True
 
@@ -257,9 +259,7 @@ class SlaveDeployer:
         logger.info("Initializing kernel protection...")
 
         # Call init_protection function from library
-        init_command = (
-            f"source {self.deploy_path}/bisect-functions.sh && init_protection"
-        )
+        init_command = f"source {self.deploy_path}/bisect-functions.sh && init_protection"
 
         try:
             ret, stdout, stderr = self._ssh_command(init_command, timeout=60)
@@ -312,9 +312,7 @@ class SlaveDeployer:
 
         # Check 3: Protection initialized
         try:
-            ret, _, _ = self._ssh_command(
-                f"test -f {DEFAULT_STATE_DIR}/protected-kernels.list"
-            )
+            ret, _, _ = self._ssh_command(f"test -f {DEFAULT_STATE_DIR}/protected-kernels.list")
             if ret == 0:
                 checks.append("✓ Kernel protection initialized")
             else:

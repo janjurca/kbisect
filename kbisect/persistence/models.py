@@ -43,7 +43,9 @@ class Session(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="running")
     result_commit: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     config: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON as TEXT
-    session_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Bisection state JSON
+    session_state: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # Bisection state JSON
 
     # Relationships
     iterations: Mapped[List["Iteration"]] = relationship(
@@ -72,7 +74,9 @@ class Iteration(Base):
     __tablename__ = "iterations"
 
     iteration_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("sessions.session_id"), nullable=False)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sessions.session_id"), nullable=False
+    )
     iteration_num: Mapped[int] = mapped_column(Integer, nullable=False)
     commit_sha: Mapped[str] = mapped_column(String, nullable=False)
     commit_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -114,8 +118,12 @@ class Log(Base):
     __tablename__ = "logs"
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
-    host_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=True)
+    iteration_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("iterations.iteration_id"), nullable=False
+    )
+    host_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("hosts.host_id"), nullable=True
+    )
     log_type: Mapped[str] = mapped_column(String, nullable=False)
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
@@ -137,8 +145,12 @@ class BuildLog(Base):
     __tablename__ = "build_logs"
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
-    host_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=True)
+    iteration_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("iterations.iteration_id"), nullable=False
+    )
+    host_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("hosts.host_id"), nullable=True
+    )
     log_type: Mapped[str] = mapped_column(String, nullable=False)
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
     log_content: Mapped[bytes] = mapped_column(BLOB, nullable=False)
@@ -167,11 +179,15 @@ class Metadata(Base):
     __tablename__ = "metadata"
 
     metadata_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("sessions.session_id"), nullable=False)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sessions.session_id"), nullable=False
+    )
     iteration_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("iterations.iteration_id"), nullable=True
     )
-    host_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=True)
+    host_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("hosts.host_id"), nullable=True
+    )
     collection_time: Mapped[str] = mapped_column(String, nullable=False)
     collection_type: Mapped[str] = mapped_column(String, nullable=False)
     data: Mapped[str] = mapped_column(Text, nullable=False)
@@ -197,7 +213,9 @@ class Host(Base):
     __tablename__ = "hosts"
 
     host_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("sessions.session_id"), nullable=False)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sessions.session_id"), nullable=False
+    )
     hostname: Mapped[str] = mapped_column(String, nullable=False)
     ssh_user: Mapped[str] = mapped_column(String, nullable=False, default="root")
     kernel_path: Mapped[str] = mapped_column(String, nullable=False)
@@ -216,8 +234,7 @@ class Host(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<Host(id={self.host_id}, hostname={self.hostname}, "
-            f"test_script={self.test_script})>"
+            f"<Host(id={self.host_id}, hostname={self.hostname}, test_script={self.test_script})>"
         )
 
 
@@ -231,7 +248,9 @@ class IterationResult(Base):
     __tablename__ = "iteration_results"
 
     result_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
+    iteration_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("iterations.iteration_id"), nullable=False
+    )
     host_id: Mapped[int] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=False)
     build_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     boot_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
