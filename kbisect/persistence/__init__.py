@@ -11,12 +11,10 @@ from kbisect.persistence.state_manager import StateManager
 
 
 __all__ = [
-    # Models
-    "Session",
+    "BuildLog",
     "Iteration",
     "Log",
-    "BuildLog",
     "Metadata",
-    # State Manager
+    "Session",
     "StateManager",
 ]

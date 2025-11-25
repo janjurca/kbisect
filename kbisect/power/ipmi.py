@@ -103,7 +103,8 @@ class IPMIController(PowerController):
                 self.user,
                 "-f",
                 password_file,
-            ] + args
+                *args,
+            ]
 
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout, check=False

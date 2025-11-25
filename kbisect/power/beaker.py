@@ -117,7 +117,7 @@ class BeakerController(PowerController):
         logger.info(f"Powering on system {self.hostname} via Beaker...")
 
         try:
-            ret, stdout, stderr = self._run_beaker_command("on")
+            ret, _stdout, stderr = self._run_beaker_command("on")
         except BeakerError as exc:
             logger.error(f"Power on failed: {exc}")
             return False
@@ -129,7 +129,7 @@ class BeakerController(PowerController):
         logger.info(f"✓ Power on command sent for {self.hostname}")
         return True
 
-    def power_off(self, force: bool = False) -> bool:
+    def power_off(self, _force: bool = False) -> bool:
         """Power off the system.
 
         Args:
@@ -141,7 +141,7 @@ class BeakerController(PowerController):
         logger.info(f"Powering off system {self.hostname} via Beaker...")
 
         try:
-            ret, stdout, stderr = self._run_beaker_command("off")
+            ret, _stdout, stderr = self._run_beaker_command("off")
         except BeakerError as exc:
             logger.error(f"Power off failed: {exc}")
             return False
@@ -204,7 +204,7 @@ class BeakerController(PowerController):
 
         # Send reboot command
         try:
-            ret, stdout, stderr = self._run_beaker_command("reboot")
+            ret, _stdout, stderr = self._run_beaker_command("reboot")
         except BeakerError as exc:
             logger.error(f"Reset failed: {exc}")
             return False
@@ -234,7 +234,7 @@ class BeakerController(PowerController):
         )
         return False
 
-    def set_boot_device(self, device: BootDevice, persistent: bool = False) -> bool:
+    def set_boot_device(self, _device: BootDevice, _persistent: bool = False) -> bool:
         """Set next boot device.
 
         Note: Beaker does not support boot device configuration.

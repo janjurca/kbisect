@@ -133,7 +133,7 @@ class PowerController(ABC):
         """
         return None
 
-    def activate_serial_console(self, duration: int = 30) -> Optional[str]:
+    def activate_serial_console(self, _duration: int = 30) -> Optional[str]:
         """Activate serial console and capture output.
 
         Optional method. Some power controllers provide serial console access.

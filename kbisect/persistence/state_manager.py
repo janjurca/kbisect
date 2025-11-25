@@ -1488,7 +1488,7 @@ class StateManager:
         file_type: str,
         file_content: str,
         host_id: Optional[int] = None,
-        **extra_metadata: Any,
+        **_extra_metadata: Any,
     ) -> int:
         """Store file as a metadata record with collection_type='file'.
 
