@@ -5,7 +5,6 @@ Handles copying scripts, installing services, and initializing the slave machine
 """
 
 import logging
-import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -116,8 +115,8 @@ class SlaveDeployer:
         """
         try:
             # Step 1: Create remote directory structure
-            remote_dir = os.path.dirname(remote_path)
-            ret, _, stderr = self._ssh_command(f"mkdir -p {shlex.quote(remote_dir)}")
+            remote_dir = Path(remote_path).parent
+            ret, _, stderr = self._ssh_command(f"mkdir -p {shlex.quote(str(remote_dir))}")
             if ret != 0:
                 logger.error(f"Failed to create remote directory: {stderr}")
                 return False
@@ -144,7 +143,7 @@ class SlaveDeployer:
         except subprocess.TimeoutExpired:
             msg = "File transfer timed out"
             logger.error(msg)
-            raise TransferError(msg)
+            raise TransferError(msg) from None
         except Exception as exc:
             msg = f"File transfer error: {exc}"
             logger.error(msg)
@@ -372,7 +371,7 @@ class SlaveDeployer:
             return False
 
         # Step 5: Verify deployment
-        success, checks = self.verify_deployment()
+        success, _checks = self.verify_deployment()
 
         if success:
             logger.info("=" * 60)
@@ -447,7 +446,7 @@ def main() -> int:
     if args.check_only:
         if deployer.is_deployed():
             print("Slave is deployed")
-            success, checks = deployer.verify_deployment()
+            success, _checks = deployer.verify_deployment()
             return 0 if success else 1
 
         print("Slave is NOT deployed")

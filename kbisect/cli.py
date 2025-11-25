@@ -90,7 +90,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config_dict
 
 
-def create_bisect_config(config_dict: Dict[str, Any], args: Any) -> BisectConfig:
+def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfig:
     """Create BisectConfig from config dict and CLI args.
 
     Args:
@@ -332,7 +332,7 @@ def _resume_session(session, state: StateManager, config_dict: dict) -> bool:
                     )
 
                 # Mark the commit via SSH (use first host since all share git state)
-                first_host_name, first_ssh, first_host_dict = ssh_clients[0]
+                _first_host_name, first_ssh, first_host_dict = ssh_clients[0]
                 kernel_path = first_host_dict.get("kernel_path", "/root/kernel")
                 mark_cmd = f"cd {kernel_path} && git bisect {mark_as}"
                 ret, _, stderr = first_ssh.run_command(mark_cmd, timeout=first_ssh.connect_timeout)
@@ -388,10 +388,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     bad = args.bad_commit or session.bad_commit
 
     # Check for halted session and handle resume
-    if session and session.status == "halted":
-        if not _resume_session(session, state, config_dict):
-            state.close()
-            return 1
+    if session and session.status == "halted" and not _resume_session(session, state, config_dict):
+        state.close()
+        return 1
 
     # Create bisect config
     config = create_bisect_config(config_dict, args)
@@ -592,7 +591,7 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
         print(f"Note: {len(ipmi_hosts)} hosts have IPMI configured, using first host")
         print("  (Future: Use --host-index to select specific host)\n")
 
-    host_index, host_dict = ipmi_hosts[0]
+    _host_index, host_dict = ipmi_hosts[0]
     host_name = host_dict["hostname"]
 
     print(f"=== IPMI Control for {host_name} ===\n")

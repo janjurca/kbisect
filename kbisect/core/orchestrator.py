@@ -1099,7 +1099,7 @@ class BisectMaster:
                 buffer_size = 0
 
         # Call build_kernel function with streaming
-        ret, stdout, stderr = host_manager.ssh.call_function_streaming(
+        ret, stdout, _stderr = host_manager.ssh.call_function_streaming(
             "build_kernel",
             commit_sha,
             host_manager.config.kernel_path,
@@ -1200,7 +1200,7 @@ class BisectMaster:
         return False, error_msg
 
     def _reboot_host(
-        self, host_manager: HostManager, iteration_id: int, expected_kernel_ver: Optional[str]
+        self, host_manager: HostManager, _iteration_id: int, expected_kernel_ver: Optional[str]
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """Reboot a specific host and verify kernel.
 
@@ -1723,7 +1723,7 @@ class BisectMaster:
                 return (iteration, bisection_complete)
 
             # Phase 2: Reboot
-            phase_ok, reboot_results, bisection_complete = self._reboot_phase(
+            phase_ok, _reboot_results, bisection_complete = self._reboot_phase(
                 iteration_id, build_results, commit_sha, iteration
             )
             if not phase_ok:

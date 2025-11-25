@@ -4,11 +4,13 @@
 Handles power control, serial console access, and boot device configuration.
 """
 
+import contextlib
 import logging
 import os
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from kbisect.power.base import (
@@ -89,7 +91,7 @@ class IPMIController(PowerController):
                 os.close(fd)
 
             # Set restrictive permissions (only owner can read)
-            os.chmod(password_file, 0o600)
+            Path(password_file).chmod(0o600)
 
             cmd = [
                 "ipmitool",
@@ -118,14 +120,14 @@ class IPMIController(PowerController):
             raise IPMICommandError(msg) from exc
         finally:
             # Clean up password file - CRITICAL for security
-            if password_file and os.path.exists(password_file):
+            if password_file and Path(password_file).exists():
                 # Try multiple times with increasing force
                 deleted = False
                 for attempt in range(3):
                     try:
                         # Ensure file is writable before deletion
-                        os.chmod(password_file, 0o600)
-                        os.unlink(password_file)
+                        Path(password_file).chmod(0o600)
+                        Path(password_file).unlink()
                         deleted = True
                         break
                     except OSError as e:
@@ -141,7 +143,7 @@ class IPMIController(PowerController):
                 if not deleted:
                     # Last resort: try to zero out the file content
                     try:
-                        with open(password_file, "w") as f:
+                        with Path(password_file).open("w") as f:
                             f.write("")
                         logger.warning(
                             f"Zeroed out password file {password_file} but could not delete it"
@@ -180,7 +182,7 @@ class IPMIController(PowerController):
         logger.info("Powering on system via IPMI...")
 
         try:
-            ret, stdout, stderr = self._run_ipmi_command(["power", "on"])
+            ret, _stdout, stderr = self._run_ipmi_command(["power", "on"])
         except IPMIError:
             return False
 
@@ -204,9 +206,9 @@ class IPMIController(PowerController):
 
         try:
             if force:
-                ret, stdout, stderr = self._run_ipmi_command(["power", "off"])
+                ret, _stdout, stderr = self._run_ipmi_command(["power", "off"])
             else:
-                ret, stdout, stderr = self._run_ipmi_command(["power", "soft"])
+                ret, _stdout, stderr = self._run_ipmi_command(["power", "soft"])
         except IPMIError:
             return False
 
@@ -254,7 +256,7 @@ class IPMIController(PowerController):
         logger.info("Resetting system via IPMI...")
 
         try:
-            ret, stdout, stderr = self._run_ipmi_command(["power", "reset"])
+            ret, _stdout, stderr = self._run_ipmi_command(["power", "reset"])
         except IPMIError:
             return False
 
@@ -282,7 +284,7 @@ class IPMIController(PowerController):
             args.append("options=efiboot")
 
         try:
-            ret, stdout, stderr = self._run_ipmi_command(args)
+            ret, _stdout, stderr = self._run_ipmi_command(args)
         except IPMIError:
             return False
 
@@ -409,7 +411,7 @@ class IPMIController(PowerController):
         logger.info("Clearing SEL log...")
 
         try:
-            ret, stdout, stderr = self._run_ipmi_command(["sel", "clear"])
+            ret, _stdout, stderr = self._run_ipmi_command(["sel", "clear"])
         except IPMIError:
             return False
 
@@ -437,7 +439,7 @@ class IPMIController(PowerController):
             time.sleep(1)
 
             # Activate SOL
-            ret, stdout, stderr = self._run_ipmi_command(["sol", "activate"], timeout=duration)
+            _ret, stdout, _stderr = self._run_ipmi_command(["sol", "activate"], timeout=duration)
 
             return stdout
 
@@ -446,12 +448,10 @@ class IPMIController(PowerController):
             return None
         finally:
             # Deactivate SOL
-            try:
+            with contextlib.suppress(IPMIError):
                 self._run_ipmi_command(["sol", "deactivate"], timeout=SOL_DEACTIVATE_TIMEOUT)
-            except IPMIError:
-                pass  # Best effort cleanup
 
-    def force_safe_boot(self, safe_kernel_path: str = "/boot/vmlinuz-production") -> bool:
+    def force_safe_boot(self, _safe_kernel_path: str = "/boot/vmlinuz-production") -> bool:
         """Force boot to safe kernel.
 
         This is used when the test kernel fails to boot.

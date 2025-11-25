@@ -544,13 +544,7 @@ class SystemChecker:
         for category, results in categories.items():
             print(f"[{category}]")
             for result in results:
-                if result.passed:
-                    if result.warning:
-                        symbol = "⚠"
-                    else:
-                        symbol = "✓"
-                else:
-                    symbol = "✗"
+                symbol = ("⚠" if result.warning else "✓") if result.passed else "✗"
 
                 print(f"{symbol} {result.name}: {result.message}")
                 if result.details:
