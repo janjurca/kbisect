@@ -6,7 +6,6 @@ Orchestrates the kernel bisection process across master and slave machines.
 
 import json
 import logging
-import select
 import shlex
 import shutil
 import subprocess
@@ -17,16 +16,16 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Generator, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 
 if TYPE_CHECKING:
     from kbisect.collectors import ConsoleCollector
-    from kbisect.power import IPMIController
     from kbisect.power.base import PowerController
 
 from kbisect.config.config import BisectConfig, HostConfig
 from kbisect.remote import SSHClient
+
 
 logger = logging.getLogger(__name__)
 
@@ -485,7 +484,7 @@ class BisectMaster:
             success_count += 1
 
         if success_count == 0:
-            logger.warning(f"Failed to capture kernel config from any host")
+            logger.warning("Failed to capture kernel config from any host")
             return False
 
         # Store combined config content as metadata record with collection_type='file'
@@ -731,10 +730,10 @@ class BisectMaster:
                     all_success = False
                     continue
 
-                logger.info(f"  ✓ Transfer successful, repository verified")
+                logger.info("  ✓ Transfer successful, repository verified")
 
             except subprocess.TimeoutExpired:
-                logger.error(f"  Repository transfer timed out")
+                logger.error("  Repository transfer timed out")
                 all_success = False
             except Exception as exc:
                 logger.error(f"  Error transferring repository: {exc}")

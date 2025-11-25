@@ -6,7 +6,6 @@ Migrated from raw sqlite3 to SQLAlchemy 2.0 for better type safety and maintaina
 """
 
 import gzip
-import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -25,6 +24,8 @@ from kbisect.persistence.models import (
     IterationResult,
     Log,
     Metadata,
+)
+from kbisect.persistence.models import (
     Session as SessionModel,
 )
 

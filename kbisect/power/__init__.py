@@ -2,8 +2,8 @@
 
 from kbisect.power.base import (
     BootDevice,
-    PowerController,
     PowerControlError,
+    PowerController,
     PowerState,
 )
 from kbisect.power.beaker import (
@@ -18,6 +18,7 @@ from kbisect.power.ipmi import (
     IPMIError,
     IPMITimeoutError,
 )
+
 
 __all__ = [
     # Base classes and enums

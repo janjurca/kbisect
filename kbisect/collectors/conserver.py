@@ -12,10 +12,10 @@ import time
 from typing import Optional
 
 from kbisect.collectors.base import (
-    ConsoleCollector,
-    ConsoleCollectionError,
     DEFAULT_MAX_BUFFER_LINES,
     PROCESS_TERM_TIMEOUT,
+    ConsoleCollectionError,
+    ConsoleCollector,
 )
 
 

@@ -7,16 +7,13 @@ Uses IPMI SOL to capture console output during kernel boot.
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from kbisect.collectors.base import (
-    ConsoleCollector,
-    DEFAULT_MAX_BUFFER_LINES,
     DEFAULT_COLLECTION_TIMEOUT,
+    DEFAULT_MAX_BUFFER_LINES,
+    ConsoleCollector,
 )
-
-if TYPE_CHECKING:
-    from kbisect.power import IPMIController
 
 
 logger = logging.getLogger(__name__)

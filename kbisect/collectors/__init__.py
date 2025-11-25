@@ -6,9 +6,10 @@ from kbisect.collectors.base import ConsoleCollector
 from kbisect.collectors.conserver import ConserverCollector
 from kbisect.collectors.ipmi_sol import IPMISOLCollector
 
+
 __all__ = [
-    "ConsoleCollector",
     "ConserverCollector",
+    "ConsoleCollector",
     "IPMISOLCollector",
 ]
 

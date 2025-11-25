@@ -5,18 +5,15 @@ Defines database schema using SQLAlchemy declarative models.
 Compatible with existing sqlite3 schema for backward compatibility.
 """
 
-from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import (
     BLOB,
     Boolean,
-    Column,
     ForeignKey,
     Integer,
     String,
     Text,
-    create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 

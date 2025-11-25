@@ -2,6 +2,7 @@
 
 from kbisect.deployment.deployer import SlaveDeployer
 
+
 __all__ = [
     "SlaveDeployer",
 ]

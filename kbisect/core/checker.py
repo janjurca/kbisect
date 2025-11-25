@@ -10,6 +10,7 @@ from ..config.config import BisectConfig
 from ..deployment.deployer import SlaveDeployer
 from ..remote.ssh import SSHClient
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -196,7 +197,7 @@ class SystemChecker:
                     category=f"Host: {hostname}",
                     name="SSH connection",
                     passed=False,
-                    message=f"Connection failed: {str(e)}",
+                    message=f"Connection failed: {e!s}",
                 )
             )
 
@@ -241,7 +242,7 @@ class SystemChecker:
                             category=f"Host: {hostname}",
                             name="slave deployment",
                             passed=False,
-                            message=f"Deployment verification failed: {str(e)}",
+                            message=f"Deployment verification failed: {e!s}",
                         )
                     )
             else:
@@ -313,7 +314,7 @@ class SystemChecker:
                     category=f"Host: {hostname}",
                     name="slave checks",
                     passed=False,
-                    message=f"Unable to perform slave checks: {str(e)}",
+                    message=f"Unable to perform slave checks: {e!s}",
                 )
             )
 
@@ -415,7 +416,7 @@ class SystemChecker:
                     category=f"Host: {hostname}",
                     name=f"{power_type} power control",
                     passed=False,
-                    message=f"Failed to initialize: {str(e)}",
+                    message=f"Failed to initialize: {e!s}",
                 )
             )
 

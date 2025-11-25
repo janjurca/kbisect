@@ -357,7 +357,7 @@ class IPMIController(PowerController):
             result["healthy"] = True
 
         except Exception as e:
-            result["error"] = f"Failed to communicate with IPMI interface: {str(e)}"
+            result["error"] = f"Failed to communicate with IPMI interface: {e!s}"
             result["checks"].append({"name": "connectivity", "passed": False})
             return result
 

@@ -304,7 +304,7 @@ class BeakerController(PowerController):
             result["checks"].append({"name": "kerberos_auth", "passed": False})
             return result
         except Exception as e:
-            result["error"] = f"Failed to check Kerberos authentication: {str(e)}"
+            result["error"] = f"Failed to check Kerberos authentication: {e!s}"
             result["checks"].append({"name": "kerberos_auth", "passed": False})
             return result
 
