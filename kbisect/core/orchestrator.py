@@ -2010,22 +2010,7 @@ class BisectMaster:
         logger.info(f"Commit: {commit_sha}")
         logger.info(f"Hosts: {len(self.host_managers)}")
 
-        # Step 1: Expand short commit SHA to full SHA (if needed)
-        commit_full = self._resolve_commit_sha(commit_sha)
-        if not commit_full:
-            # Error details already logged by _resolve_commit_sha()
-            # Just add a summary for the user
-            print(f"\n✗ Unable to resolve commit: {commit_sha}")
-            print("See error messages above for details")
-            return False
-
-        logger.info(f"Resolved commit: {commit_full[:SHORT_COMMIT_LENGTH]}")
-
-        # Step 2: Get commit message for display
-        commit_msg = self._get_commit_message(commit_full)
-        print(f"Commit: {commit_full[:SHORT_COMMIT_LENGTH]} - {commit_msg}\n")
-
-        # Step 2.5: Pre-flight check - verify kernel_path exists on all hosts
+        # Step 1: Pre-flight check - verify kernel_path exists on all hosts
         print("Checking if hosts are initialized...")
         all_initialized = True
         uninitialized_hosts = []
@@ -2070,7 +2055,22 @@ class BisectMaster:
         else:
             print("✓ All hosts ready\n")
 
-        # Step 3: Validate commit exists on all hosts
+        # Step 2: Expand short commit SHA to full SHA (if needed)
+        commit_full = self._resolve_commit_sha(commit_sha)
+        if not commit_full:
+            # Error details already logged by _resolve_commit_sha()
+            # Just add a summary for the user
+            print(f"\n✗ Unable to resolve commit: {commit_sha}")
+            print("See error messages above for details")
+            return False
+
+        logger.info(f"Resolved commit: {commit_full[:SHORT_COMMIT_LENGTH]}")
+
+        # Step 3: Get commit message for display
+        commit_msg = self._get_commit_message(commit_full)
+        print(f"Commit: {commit_full[:SHORT_COMMIT_LENGTH]} - {commit_msg}\n")
+
+        # Step 4: Validate commit exists on all hosts
         print("Validating commit on all hosts...")
         all_valid = True
         missing_hosts = []
@@ -2104,7 +2104,7 @@ class BisectMaster:
 
         print("✓ Commit exists on all hosts\n")
 
-        # Step 4: Create temporary database records if saving logs
+        # Step 5: Create temporary database records if saving logs
         iteration_id = 0
         session_id = None
         if save_logs:
@@ -2117,7 +2117,7 @@ class BisectMaster:
         else:
             logger.info("Build logs will not be saved (use --save-logs to enable)")
 
-        # Step 5: Build on all hosts in parallel
+        # Step 6: Build on all hosts in parallel
         print(f"Building kernel on {len(self.host_managers)} hosts...\n")
 
         build_results = {}
@@ -2166,7 +2166,7 @@ class BisectMaster:
                             "error": f"Build timed out after {overall_timeout}s",
                         }
 
-        # Step 6: Report results
+        # Step 7: Report results
         print("\n=== Build Summary ===")
         all_success = True
 
