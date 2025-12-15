@@ -1992,6 +1992,218 @@ class BisectMaster:
 
         logger.info("=" * 60 + "\n")
 
+    def build_only(self, commit_sha: str, save_logs: bool = False) -> bool:
+        """Build kernel on all hosts without rebooting or testing.
+
+        This is a standalone build operation that doesn't require an active
+        bisection session. It builds the specified commit on all configured
+        hosts in parallel.
+
+        Args:
+            commit_sha: Full or short commit SHA to build
+            save_logs: If True, save build logs to database
+
+        Returns:
+            True if build succeeded on all hosts, False otherwise
+        """
+        logger.info("=== Standalone Kernel Build ===")
+        logger.info(f"Commit: {commit_sha}")
+        logger.info(f"Hosts: {len(self.host_managers)}")
+
+        # Step 1: Expand short commit SHA to full SHA (if needed)
+        commit_full = self._resolve_commit_sha(commit_sha)
+        if not commit_full:
+            logger.error(f"Failed to resolve commit: {commit_sha}")
+            return False
+
+        logger.info(f"Resolved commit: {commit_full[:SHORT_COMMIT_LENGTH]}")
+
+        # Step 2: Get commit message for display
+        commit_msg = self._get_commit_message(commit_full)
+        print(f"Commit: {commit_full[:SHORT_COMMIT_LENGTH]} - {commit_msg}\n")
+
+        # Step 3: Validate commit exists on all hosts
+        print("Validating commit on all hosts...")
+        all_valid = True
+        missing_hosts = []
+
+        for host_manager in self.host_managers:
+            hostname = host_manager.config.hostname
+            kernel_path = host_manager.config.kernel_path
+
+            ret, _stdout, stderr = host_manager.ssh.run_command(
+                f"cd {shlex.quote(kernel_path)} && git cat-file -t {shlex.quote(commit_full)}",
+                timeout=host_manager.ssh_connect_timeout,
+            )
+
+            if ret != 0:
+                all_valid = False
+                missing_hosts.append(hostname)
+                logger.error(f"  ✗ {hostname}: commit not found")
+            else:
+                logger.debug(f"  ✓ {hostname}: commit exists")
+
+        if not all_valid:
+            logger.error(f"\nCommit {commit_full[:SHORT_COMMIT_LENGTH]} not found on hosts: {', '.join(missing_hosts)}")
+            logger.error("Ensure all hosts have the commit in their git repository")
+            return False
+
+        print("✓ Commit exists on all hosts\n")
+
+        # Step 4: Create temporary database records if saving logs
+        iteration_id = 0
+        session_id = None
+        if save_logs:
+            # Create temporary session for build-only (use dummy commits)
+            session_id = self.state.create_session(
+                good_commit="build-only", bad_commit=commit_full[:SHORT_COMMIT_LENGTH]
+            )
+            iteration_id = self.state.create_iteration(session_id, 1, commit_full, commit_msg)
+            logger.info(f"Saving logs to database (session_id={session_id})")
+        else:
+            logger.info("Build logs will not be saved (use --save-logs to enable)")
+
+        # Step 5: Build on all hosts in parallel
+        print(f"Building kernel on {len(self.host_managers)} hosts...\n")
+
+        build_results = {}
+        overall_timeout = self.config.build_timeout * 1.1
+
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    self._build_on_host, host_manager, commit_full, iteration_id
+                ): host_manager
+                for host_manager in self.host_managers
+            }
+
+            try:
+                for future in as_completed(futures, timeout=overall_timeout):
+                    host_manager = futures[future]
+                    try:
+                        success, exit_code, log_id, kernel_ver = future.result()
+                        build_results[host_manager.host_id] = {
+                            "hostname": host_manager.config.hostname,
+                            "success": success,
+                            "kernel_ver": kernel_ver,
+                            "exit_code": exit_code,
+                            "log_id": log_id,
+                        }
+                    except Exception as exc:
+                        logger.error(
+                            f"  [{host_manager.config.hostname}] Build exception: {exc}"
+                        )
+                        build_results[host_manager.host_id] = {
+                            "hostname": host_manager.config.hostname,
+                            "success": False,
+                            "error": str(exc),
+                        }
+            except TimeoutError:
+                logger.error(f"Build phase timed out after {overall_timeout}s")
+                # Mark any hosts without results as timed out
+                for host_manager in self.host_managers:
+                    if host_manager.host_id not in build_results:
+                        logger.error(
+                            f"  [{host_manager.config.hostname}] Build timed out"
+                        )
+                        build_results[host_manager.host_id] = {
+                            "hostname": host_manager.config.hostname,
+                            "success": False,
+                            "error": f"Build timed out after {overall_timeout}s",
+                        }
+
+        # Step 6: Report results
+        print("\n=== Build Summary ===")
+        all_success = True
+
+        for result in build_results.values():
+            hostname = result["hostname"]
+            if result.get("success"):
+                kernel_ver = result.get("kernel_ver", "unknown")
+                print(f"  ✓ {hostname}: {kernel_ver}")
+                logger.info(f"  ✓ {hostname}: {kernel_ver}")
+            else:
+                all_success = False
+                error = result.get("error", "Build failed")
+                print(f"  ✗ {hostname}: {error}")
+                logger.error(f"  ✗ {hostname}: {error}")
+
+        if save_logs and session_id:
+            print(f"\nBuild logs saved. View with:")
+            print(f"  kbisect logs list --session-id {session_id}")
+
+        return all_success
+
+    def _resolve_commit_sha(self, commit_sha: str) -> Optional[str]:
+        """Resolve short or full commit SHA to full SHA.
+
+        Args:
+            commit_sha: Short or full commit SHA
+
+        Returns:
+            Full 40-character SHA, or None if resolution failed
+        """
+        # If already 40 chars and valid hex, return as-is
+        if len(commit_sha) == COMMIT_HASH_LENGTH:
+            try:
+                int(commit_sha, 16)
+                return commit_sha
+            except ValueError:
+                pass
+
+        # Use first host to resolve (all hosts share same repo state)
+        first_host = self.host_managers[0]
+        kernel_path = first_host.config.kernel_path
+
+        ret, stdout, stderr = first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && git rev-parse {shlex.quote(commit_sha)}",
+            timeout=first_host.ssh_connect_timeout,
+        )
+
+        if ret != 0:
+            logger.error(f"Failed to resolve commit SHA: {stderr}")
+            return None
+
+        full_sha = stdout.strip()
+
+        # Validate it's 40 chars and hex
+        if len(full_sha) != COMMIT_HASH_LENGTH:
+            logger.error(f"Invalid commit SHA length: {full_sha}")
+            return None
+
+        try:
+            int(full_sha, 16)
+        except ValueError:
+            logger.error(f"Invalid commit SHA format: {full_sha}")
+            return None
+
+        return full_sha
+
+    def _get_commit_message(self, commit_sha: str) -> str:
+        """Get commit message for display.
+
+        Args:
+            commit_sha: Commit SHA
+
+        Returns:
+            Commit message (first line)
+        """
+        first_host = self.host_managers[0]
+        kernel_path = first_host.config.kernel_path
+
+        ret, stdout, _stderr = first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && git log -1 --oneline {shlex.quote(commit_sha)}",
+            timeout=first_host.ssh_connect_timeout,
+        )
+
+        if ret == 0 and stdout.strip():
+            # Remove the commit SHA prefix from oneline output
+            parts = stdout.strip().split(maxsplit=1)
+            if len(parts) > 1:
+                return parts[1]
+            return stdout.strip()
+        return "Unknown commit"
+
 
 def main() -> int:
     """Main entry point."""

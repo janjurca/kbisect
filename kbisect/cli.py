@@ -1130,6 +1130,43 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    """Build kernel for a specific commit without running tests.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    print(f"=== Building Kernel: {args.commit[:7]} ===\n")
+
+    # Load config
+    config_dict = load_config(args.config)
+
+    # Validate hosts configuration
+    if "hosts" not in config_dict or not config_dict["hosts"]:
+        print("✗ Config file must have 'hosts' section")
+        return 1
+
+    # Create bisect config
+    config = create_bisect_config(config_dict, args)
+
+    # Create temporary BisectMaster instance for build operations
+    # Use dummy commits since we're not running bisection
+    bisect = BisectMaster(config, "dummy", "dummy")
+
+    # Run build-only operation
+    success = bisect.build_only(args.commit, save_logs=args.save_logs)
+
+    if success:
+        print("\n✓ Build complete on all hosts")
+        return 0
+    else:
+        print("\n✗ Build failed on one or more hosts")
+        return 1
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create argument parser.
 
@@ -1285,6 +1322,17 @@ def create_parser() -> argparse.ArgumentParser:
         "--format", choices=["json", "yaml"], default="json", help="Output format"
     )
 
+    # build command
+    parser_build = subparsers.add_parser(
+        "build", help="Build kernel for a specific commit (no reboot, no tests)"
+    )
+    parser_build.add_argument("commit", help="Commit hash to build (full 40-char SHA or short form)")
+    parser_build.add_argument(
+        "--save-logs",
+        action="store_true",
+        help="Save build logs to database (creates temporary session)",
+    )
+
     return parser
 
 
@@ -1323,6 +1371,8 @@ def main() -> int:
             return cmd_logs(args)
         if args.command == "metadata":
             return cmd_metadata(args)
+        if args.command == "build":
+            return cmd_build(args)
 
         parser.print_help()
         return 1
