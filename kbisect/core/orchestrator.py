@@ -2034,31 +2034,41 @@ class BisectMaster:
             hostname = host_manager.config.hostname
             kernel_path = host_manager.config.kernel_path
 
-            # Check if directory exists
+            # Check if directory exists and is a git repository
             ret, _stdout, _stderr = host_manager.ssh.run_command(
-                f"test -d {shlex.quote(kernel_path)} && echo 'exists'",
+                f"test -d {shlex.quote(kernel_path)}/.git && echo 'exists'",
                 timeout=host_manager.ssh_connect_timeout,
             )
 
             if ret != 0:
                 all_initialized = False
                 uninitialized_hosts.append(hostname)
-                logger.debug(f"  ✗ {hostname}: kernel_path does not exist")
+                logger.debug(f"  ✗ {hostname}: kernel repository not found")
             else:
-                logger.debug(f"  ✓ {hostname}: kernel_path exists")
+                logger.debug(f"  ✓ {hostname}: kernel repository exists")
 
         if not all_initialized:
-            print("\n✗ Hosts not initialized. Kernel source directory missing on:")
-            for host in uninitialized_hosts:
-                print(f"  - {host}")
-            print("\nThe kernel source needs to be set up on remote hosts first.")
-            print("Please run:")
-            print("  kbisect init <good-commit> <bad-commit>")
-            print("\nThis will copy the kernel repository to all configured hosts.")
-            logger.error("Hosts not initialized - kernel_path missing")
-            return False
+            print(f"⚠ Kernel source not found on {len(uninitialized_hosts)} host(s)")
+            print("Setting up kernel source automatically...\n")
 
-        print("✓ All hosts initialized\n")
+            # Try to auto-initialize hosts
+            try:
+                success = self._auto_initialize_hosts()
+                if not success:
+                    print("\n✗ Failed to set up kernel source on hosts")
+                    print("\nPlease ensure either:")
+                    print("  1. A local kernel repository exists (will be copied to hosts)")
+                    print("  2. kernel_repo_source is configured in bisect.yaml (will be cloned)")
+                    return False
+
+                print("✓ Kernel source set up successfully\n")
+            except Exception as exc:
+                logger.error(f"Auto-initialization failed: {exc}")
+                print("\n✗ Failed to automatically set up kernel source")
+                print("Please run 'kbisect init <good> <bad>' manually")
+                return False
+        else:
+            print("✓ All hosts ready\n")
 
         # Step 3: Validate commit exists on all hosts
         print("Validating commit on all hosts...")
@@ -2178,6 +2188,37 @@ class BisectMaster:
 
         return all_success
 
+    def _auto_initialize_hosts(self) -> bool:
+        """Automatically initialize hosts with kernel source.
+
+        Tries to find kernel source locally first, then falls back to
+        cloning from configured remote repository.
+
+        Returns:
+            True if initialization succeeded, False otherwise
+        """
+        logger.info("Auto-initializing hosts with kernel source...")
+
+        # Step 1: Try to prepare kernel repository
+        # This will try local first, then fall back to cloning from remote
+        repo_path = self._prepare_kernel_repo()
+        if not repo_path:
+            logger.error("Failed to prepare kernel repository")
+            return False
+
+        logger.info(f"Kernel repository prepared at: {repo_path}")
+
+        # Step 2: Transfer repository to all hosts
+        print(f"Copying kernel source to {len(self.host_managers)} host(s)...")
+        success = self._transfer_repo_to_hosts(repo_path)
+
+        if not success:
+            logger.error("Failed to transfer repository to hosts")
+            return False
+
+        logger.info("Repository transferred successfully to all hosts")
+        return True
+
     def _extract_git_error(self, stderr: str) -> str:
         """Extract meaningful error from stderr, filtering SSH warnings.
 
@@ -2238,7 +2279,7 @@ class BisectMaster:
             if "No such file or directory" in error_msg and ("cd:" in error_msg or kernel_path in error_msg):
                 logger.error(f"Kernel directory does not exist: {kernel_path}")
                 logger.error(f"Host: {first_host.config.hostname}")
-                logger.error("Run 'kbisect init <good> <bad>' to initialize hosts first")
+                logger.error("This shouldn't happen after auto-initialization - please report this issue")
             elif "not a git repository" in error_msg.lower():
                 logger.error(f"Not a git repository: {kernel_path}")
                 logger.error("Please ensure the kernel_path points to a valid git repository")
