@@ -2013,7 +2013,10 @@ class BisectMaster:
         # Step 1: Expand short commit SHA to full SHA (if needed)
         commit_full = self._resolve_commit_sha(commit_sha)
         if not commit_full:
-            logger.error(f"Failed to resolve commit: {commit_sha}")
+            # Error details already logged by _resolve_commit_sha()
+            # Just add a summary for the user
+            print(f"\n✗ Unable to resolve commit: {commit_sha}")
+            print("See error messages above for details")
             return False
 
         logger.info(f"Resolved commit: {commit_full[:SHORT_COMMIT_LENGTH]}")
@@ -2021,6 +2024,41 @@ class BisectMaster:
         # Step 2: Get commit message for display
         commit_msg = self._get_commit_message(commit_full)
         print(f"Commit: {commit_full[:SHORT_COMMIT_LENGTH]} - {commit_msg}\n")
+
+        # Step 2.5: Pre-flight check - verify kernel_path exists on all hosts
+        print("Checking if hosts are initialized...")
+        all_initialized = True
+        uninitialized_hosts = []
+
+        for host_manager in self.host_managers:
+            hostname = host_manager.config.hostname
+            kernel_path = host_manager.config.kernel_path
+
+            # Check if directory exists
+            ret, _stdout, _stderr = host_manager.ssh.run_command(
+                f"test -d {shlex.quote(kernel_path)} && echo 'exists'",
+                timeout=host_manager.ssh_connect_timeout,
+            )
+
+            if ret != 0:
+                all_initialized = False
+                uninitialized_hosts.append(hostname)
+                logger.debug(f"  ✗ {hostname}: kernel_path does not exist")
+            else:
+                logger.debug(f"  ✓ {hostname}: kernel_path exists")
+
+        if not all_initialized:
+            print("\n✗ Hosts not initialized. Kernel source directory missing on:")
+            for host in uninitialized_hosts:
+                print(f"  - {host}")
+            print("\nThe kernel source needs to be set up on remote hosts first.")
+            print("Please run:")
+            print("  kbisect init <good-commit> <bad-commit>")
+            print("\nThis will copy the kernel repository to all configured hosts.")
+            logger.error("Hosts not initialized - kernel_path missing")
+            return False
+
+        print("✓ All hosts initialized\n")
 
         # Step 3: Validate commit exists on all hosts
         print("Validating commit on all hosts...")
@@ -2044,8 +2082,14 @@ class BisectMaster:
                 logger.debug(f"  ✓ {hostname}: commit exists")
 
         if not all_valid:
-            logger.error(f"\nCommit {commit_full[:SHORT_COMMIT_LENGTH]} not found on hosts: {', '.join(missing_hosts)}")
-            logger.error("Ensure all hosts have the commit in their git repository")
+            print(f"\n✗ Commit {commit_full[:SHORT_COMMIT_LENGTH]} not found on some hosts:")
+            for host in missing_hosts:
+                print(f"  - {host}")
+            print("\nPossible solutions:")
+            print("  1. Ensure all hosts have the latest commits: git fetch origin")
+            print("  2. Check that kernel_path in bisect.yaml points to the correct repository")
+            print(f"  3. Verify the commit exists in your repository: git log --oneline | grep {commit_full[:SHORT_COMMIT_LENGTH]}")
+            logger.error(f"Commit validation failed on hosts: {', '.join(missing_hosts)}")
             return False
 
         print("✓ Commit exists on all hosts\n")
@@ -2129,10 +2173,36 @@ class BisectMaster:
                 logger.error(f"  ✗ {hostname}: {error}")
 
         if save_logs and session_id:
-            print(f"\nBuild logs saved. View with:")
+            print("\nBuild logs saved. View with:")
             print(f"  kbisect logs list --session-id {session_id}")
 
         return all_success
+
+    def _extract_git_error(self, stderr: str) -> str:
+        """Extract meaningful error from stderr, filtering SSH warnings.
+
+        Args:
+            stderr: Raw stderr output
+
+        Returns:
+            Cleaned error message
+        """
+        lines = stderr.strip().split('\n')
+
+        # Filter out SSH-related lines
+        error_lines = []
+        for line in lines:
+            # Skip SSH warnings and known noise
+            if any(skip in line for skip in [
+                'Permanently added',
+                'Warning:',
+                'ECDSA',
+                'known_hosts',
+            ]):
+                continue
+            error_lines.append(line)
+
+        return '\n'.join(error_lines) if error_lines else stderr
 
     def _resolve_commit_sha(self, commit_sha: str) -> Optional[str]:
         """Resolve short or full commit SHA to full SHA.
@@ -2161,7 +2231,25 @@ class BisectMaster:
         )
 
         if ret != 0:
-            logger.error(f"Failed to resolve commit SHA: {stderr}")
+            # Parse stderr to extract meaningful error
+            error_msg = stderr.strip()
+
+            # Detect common issues and provide helpful hints
+            if "No such file or directory" in error_msg and ("cd:" in error_msg or kernel_path in error_msg):
+                logger.error(f"Kernel directory does not exist: {kernel_path}")
+                logger.error(f"Host: {first_host.config.hostname}")
+                logger.error("Run 'kbisect init <good> <bad>' to initialize hosts first")
+            elif "not a git repository" in error_msg.lower():
+                logger.error(f"Not a git repository: {kernel_path}")
+                logger.error("Please ensure the kernel_path points to a valid git repository")
+            elif "fatal: ambiguous argument" in error_msg.lower():
+                logger.error(f"Commit not found in repository: {commit_sha}")
+                logger.error("Please ensure the commit exists and the repository is up to date")
+            else:
+                # Show the actual git error, filtering out SSH noise
+                clean_error = self._extract_git_error(error_msg)
+                logger.error(f"Failed to resolve commit SHA: {clean_error}")
+
             return None
 
         full_sha = stdout.strip()
