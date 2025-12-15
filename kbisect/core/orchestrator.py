@@ -2189,10 +2189,11 @@ class BisectMaster:
         return all_success
 
     def _auto_initialize_hosts(self) -> bool:
-        """Automatically initialize hosts with kernel source.
+        """Automatically initialize hosts with kernel source and build dependencies.
 
         Tries to find kernel source locally first, then falls back to
-        cloning from configured remote repository.
+        cloning from configured remote repository. After setting up the kernel
+        source, installs build dependencies on all hosts.
 
         Returns:
             True if initialization succeeded, False otherwise
@@ -2217,6 +2218,35 @@ class BisectMaster:
             return False
 
         logger.info("Repository transferred successfully to all hosts")
+
+        # Step 3: Install build dependencies on all hosts
+        print("Installing build dependencies on all hosts...")
+        all_deps_installed = True
+
+        for host_manager in self.host_managers:
+            hostname = host_manager.config.hostname
+            logger.info(f"  Installing dependencies on {hostname}...")
+
+            ret, _stdout, stderr = host_manager.ssh.call_function(
+                "install_build_deps",
+                timeout=host_manager.ssh_connect_timeout
+            )
+
+            if ret != 0:
+                logger.warning(
+                    f"  Failed to install build dependencies on {hostname}: {stderr}"
+                )
+                logger.warning("  Kernel builds may fail due to missing dependencies")
+                all_deps_installed = False
+            else:
+                logger.info(f"  ✓ {hostname}: build dependencies installed")
+
+        if not all_deps_installed:
+            logger.warning("Build dependencies installation failed on one or more hosts")
+            logger.warning("Continuing anyway - builds may fail if dependencies are missing")
+        else:
+            print("✓ Build dependencies installed on all hosts\n")
+
         return True
 
     def _extract_git_error(self, stderr: str) -> str:
