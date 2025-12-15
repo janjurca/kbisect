@@ -270,6 +270,7 @@ install_build_deps() {
                 flex \
                 bison \
                 elfutils-libelf-devel \
+                openssl \
                 openssl-devel \
                 bc \
                 ncurses-devel \
