@@ -575,8 +575,8 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
     for i, host_dict in enumerate(config_dict["hosts"]):
         if (
             host_dict.get("ipmi_host")
-            and host_dict.get("ipmi_user")
-            and host_dict.get("ipmi_password")
+            and "ipmi_user" in host_dict
+            and "ipmi_password" in host_dict
         ):
             ipmi_hosts.append((i, host_dict))
 

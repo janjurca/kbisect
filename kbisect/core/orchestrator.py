@@ -132,7 +132,11 @@ class HostManager:
         # Create power controller based on configured type
         self.power_controller: Optional["PowerController"] = None  # noqa: UP037
         if host_config.power_control_type == "ipmi":
-            if host_config.ipmi_host and host_config.ipmi_user and host_config.ipmi_password:
+            if (
+                host_config.ipmi_host
+                and host_config.ipmi_user is not None
+                and host_config.ipmi_password is not None
+            ):
                 from kbisect.power import IPMIController
 
                 self.power_controller = IPMIController(

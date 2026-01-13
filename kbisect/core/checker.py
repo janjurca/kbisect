@@ -349,7 +349,11 @@ class SystemChecker:
             # Create power controller instance based on type
             controller = None
             if power_type == "ipmi":
-                if host_config.ipmi_host and host_config.ipmi_user and host_config.ipmi_password:
+                if (
+                    host_config.ipmi_host
+                    and host_config.ipmi_user is not None
+                    and host_config.ipmi_password is not None
+                ):
                     from ..power import IPMIController
 
                     controller = IPMIController(

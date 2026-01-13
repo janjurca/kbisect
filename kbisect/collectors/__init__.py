@@ -50,7 +50,7 @@ def create_console_collector(
         pass
 
     # Fall back to IPMI SOL
-    if not all([ipmi_host, ipmi_user, ipmi_password]):
+    if not (ipmi_host and ipmi_user is not None and ipmi_password is not None):
         raise RuntimeError(
             "Conserver not available and IPMI credentials not provided. "
             "Cannot create console collector."
