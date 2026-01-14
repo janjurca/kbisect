@@ -18,6 +18,7 @@ from kbisect.power.base import (
     PowerController,
     PowerState,
 )
+from kbisect.remote.ssh import SSHClient
 
 
 logger = logging.getLogger(__name__)
@@ -52,17 +53,28 @@ class IPMIController(PowerController):
         password: IPMI password for authentication
     """
 
-    def __init__(self, host: str, user: str, password: str) -> None:
+    def __init__(
+        self,
+        host: str,
+        user: str,
+        password: str,
+        ssh_host: Optional[str] = None,
+        ssh_connect_timeout: int = 15,
+    ) -> None:
         """Initialize IPMI controller.
 
         Args:
             host: IPMI interface hostname or IP address
             user: IPMI username
             password: IPMI password
+            ssh_host: SSH hostname for reboot verification (defaults to host if not provided)
+            ssh_connect_timeout: SSH connection timeout in seconds
         """
         self.host = host
         self.user = user
         self.password = password
+        self.ssh_host = ssh_host or host
+        self.ssh_connect_timeout = ssh_connect_timeout
 
     def _run_ipmi_command(
         self, args: List[str], timeout: int = DEFAULT_IPMI_TIMEOUT
@@ -251,11 +263,25 @@ class IPMIController(PowerController):
     def reset(self) -> bool:
         """Reset (hard reboot) the system.
 
+        Creates a temporary SSH connection to verify shutdown after sending
+        the reset command. This handles the asynchronous nature of IPMI reset
+        where the command returns before the actual reboot starts.
+
         Returns:
-            True if reset command succeeded, False otherwise
+            True if reset command succeeded and shutdown confirmed,
+            False otherwise
         """
         logger.info("Resetting system via IPMI...")
 
+        # Create temporary SSH client for shutdown verification
+        ssh_client = SSHClient(self.ssh_host, user="root", connect_timeout=self.ssh_connect_timeout)
+
+        # Pre-reboot connectivity check
+        logger.info("Verifying SSH connectivity before reboot...")
+        if not ssh_client.is_alive():
+            logger.warning("SSH not responsive before reboot - machine may already be down")
+
+        # Send reset command
         try:
             ret, _stdout, stderr = self._run_ipmi_command(["power", "reset"])
         except IPMIError:
@@ -266,7 +292,25 @@ class IPMIController(PowerController):
             return False
 
         logger.info("✓ Reset command sent")
-        return True
+
+        # Wait for shutdown
+        logger.info("Waiting for machine to shut down...")
+        shutdown_timeout = 120  # Fixed timeout to prevent infinite loop
+        shutdown_poll_interval = 2
+        start_time = time.time()
+
+        while time.time() - start_time < shutdown_timeout:
+            if not ssh_client.is_alive():
+                elapsed = time.time() - start_time
+                logger.info(f"✓ Machine shutdown confirmed after {elapsed:.1f}s")
+                return True
+            time.sleep(shutdown_poll_interval)
+
+        # Timeout reached - shutdown not confirmed
+        logger.warning(
+            f"Shutdown not confirmed within {shutdown_timeout}s - machine may still be up or reboot pending"
+        )
+        return False
 
     def set_boot_device(self, device: BootDevice, persistent: bool = False) -> bool:
         """Set next boot device.

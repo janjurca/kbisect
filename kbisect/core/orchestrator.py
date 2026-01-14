@@ -143,6 +143,8 @@ class HostManager:
                     host_config.ipmi_host,
                     host_config.ipmi_user,
                     host_config.ipmi_password,
+                    ssh_host=host_config.hostname,
+                    ssh_connect_timeout=ssh_connect_timeout,
                 )
         elif host_config.power_control_type == "beaker":
             from kbisect.power import BeakerController
