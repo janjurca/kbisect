@@ -573,11 +573,7 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
     # Collect all hosts with IPMI configured
     ipmi_hosts = []
     for i, host_dict in enumerate(config_dict["hosts"]):
-        if (
-            host_dict.get("ipmi_host")
-            and "ipmi_user" in host_dict
-            and "ipmi_password" in host_dict
-        ):
+        if host_dict.get("ipmi_host") and "ipmi_user" in host_dict and "ipmi_password" in host_dict:
             ipmi_hosts.append((i, host_dict))
 
     if not ipmi_hosts:
@@ -1188,8 +1184,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     # init command
     parser_init = subparsers.add_parser("init", help="Initialize bisection")
-    parser_init.add_argument("good_commit", help="Known good commit")
-    parser_init.add_argument("bad_commit", help="Known bad commit")
+    parser_init.add_argument("good_commit", help="Known good commit (OLDER, working version)")
+    parser_init.add_argument("bad_commit", help="Known bad commit (NEWER, broken version)")
     parser_init.add_argument(
         "--force-deploy",
         action="store_true",
@@ -1198,8 +1194,12 @@ def create_parser() -> argparse.ArgumentParser:
 
     # start command
     parser_start = subparsers.add_parser("start", help="Start bisection")
-    parser_start.add_argument("good_commit", nargs="?", help="Known good commit")
-    parser_start.add_argument("bad_commit", nargs="?", help="Known bad commit")
+    parser_start.add_argument(
+        "good_commit", nargs="?", help="Known good commit (OLDER, working version)"
+    )
+    parser_start.add_argument(
+        "bad_commit", nargs="?", help="Known bad commit (NEWER, broken version)"
+    )
     parser_start.add_argument("--reinit", action="store_true", help="Reinitialize bisection")
 
     # status command
@@ -1326,7 +1326,9 @@ def create_parser() -> argparse.ArgumentParser:
     parser_build = subparsers.add_parser(
         "build", help="Build kernel for a specific commit (no reboot, no tests)"
     )
-    parser_build.add_argument("commit", help="Commit hash to build (full 40-char SHA or short form)")
+    parser_build.add_argument(
+        "commit", help="Commit hash to build (full 40-char SHA or short form)"
+    )
     parser_build.add_argument(
         "--save-logs",
         action="store_true",

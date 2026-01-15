@@ -777,6 +777,28 @@ class BisectMaster:
                 return False
             logger.info(f"  ✓ {hm.config.hostname} is reachable")
 
+        # Validate commits before starting bisection
+        logger.info("Validating bisect commits...")
+        is_valid, error_msg = self._validate_bisect_commits()
+        if not is_valid:
+            logger.error("")
+            logger.error("=" * 70)
+            logger.error("COMMIT VALIDATION FAILED")
+            logger.error("=" * 70)
+            logger.error("")
+            logger.error(error_msg)
+            logger.error("")
+            logger.error("Please check your good and bad commits:")
+            logger.error(f"  Good (should be older/working): {self.good_commit}")
+            logger.error(f"  Bad (should be newer/broken):   {self.bad_commit}")
+            logger.error("")
+            logger.error("Hint: You may have swapped the commits. Try:")
+            logger.error(f"  kbisect init {self.bad_commit} {self.good_commit}")
+            logger.error("=" * 70)
+            return False
+
+        logger.info("✓ Commits validated successfully")
+
         # Prepare and transfer kernel repository if configured
         if self.config.kernel_repo_source:
             logger.info("Kernel repository source configured, preparing...")
@@ -1032,8 +1054,38 @@ class BisectMaster:
         )
 
         if ret != 0:
-            logger.error(f"Failed to mark commit: {stderr}")
-            return (False, False)
+            # Check for specific git bisect error indicating inverted range
+            if "merge base" in stderr and "is bad" in stderr:
+                logger.error(f"Failed to mark commit: {stderr}")
+                logger.error("")
+                logger.error("=" * 70)
+                logger.error("BISECT RANGE ERROR DETECTED")
+                logger.error("=" * 70)
+                logger.error("")
+                logger.error("Git bisect reports the merge base is bad. This usually means:")
+                logger.error("")
+                logger.error("1. SWAPPED COMMITS: Your good/bad commits are inverted")
+                logger.error("   - Current good: %s", self.good_commit[:12])
+                logger.error("   - Current bad:  %s", self.bad_commit[:12])
+                logger.error("   Solution: Swap the good and bad commits when reinitializing")
+                logger.error("")
+                logger.error("2. INVERTED TEST LOGIC: Your test script has reversed logic")
+                logger.error("   - Should exit 0 when bug is ABSENT (good)")
+                logger.error("   - Should exit non-zero when bug is PRESENT (bad)")
+                logger.error("")
+                logger.error("3. BUG OUTSIDE RANGE: The regression is before the good commit")
+                logger.error("   - The bug may have been introduced earlier in history")
+                logger.error("   - Or it may have been fixed (not introduced) in your range")
+                logger.error("")
+                logger.error("NOTE: This error should have been caught during initialization.")
+                logger.error("If you see this, please re-run initialization with correct commits:")
+                logger.error("  kbisect init <good> <bad>")
+                logger.error("")
+                logger.error("=" * 70)
+                return (False, False)
+            else:
+                logger.error(f"Failed to mark commit: {stderr}")
+                return (False, False)
 
         # Check if bisection just completed
         bisection_complete = "first bad commit" in stdout or "first bad commit" in stderr
@@ -1044,6 +1096,107 @@ class BisectMaster:
             logger.info("Git bisect reports: First bad commit found!")
 
         return (True, bisection_complete)
+
+    def _validate_bisect_commits(self) -> Tuple[bool, str]:
+        """Validate that good/bad commits are correct for bisection.
+
+        Checks:
+        - Both commits exist in the repository
+        - Commits are different
+        - Good commit is an ancestor of bad commit
+
+        Returns:
+            Tuple of (is_valid, error_message). If is_valid is True, error_message is empty.
+        """
+        first_host = self.host_managers[0]
+        kernel_path = first_host.config.kernel_path
+
+        # Step 1: Resolve commits to full SHAs
+        logger.debug(f"Validating commits: good={self.good_commit}, bad={self.bad_commit}")
+
+        good_full = None
+        bad_full = None
+
+        # Verify and resolve good commit
+        ret, stdout, stderr = first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && git rev-parse --verify {shlex.quote(self.good_commit)}^{{commit}}",
+            timeout=first_host.ssh_connect_timeout,
+        )
+
+        if ret != 0:
+            return (
+                False,
+                f"Good commit '{self.good_commit}' does not exist in the repository.\n"
+                f"Git error: {stderr.strip()}",
+            )
+
+        good_full = stdout.strip()
+        logger.debug(f"Good commit resolved to: {good_full}")
+
+        # Verify and resolve bad commit
+        ret, stdout, stderr = first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && git rev-parse --verify {shlex.quote(self.bad_commit)}^{{commit}}",
+            timeout=first_host.ssh_connect_timeout,
+        )
+
+        if ret != 0:
+            return (
+                False,
+                f"Bad commit '{self.bad_commit}' does not exist in the repository.\n"
+                f"Git error: {stderr.strip()}",
+            )
+
+        bad_full = stdout.strip()
+        logger.debug(f"Bad commit resolved to: {bad_full}")
+
+        # Step 2: Check if commits are the same
+        if good_full == bad_full:
+            return (
+                False,
+                f"Good and bad commits are the same: {good_full}\n"
+                "Bisection requires two different commits.",
+            )
+
+        # Step 3: Check if good commit is an ancestor of bad commit
+        ret, _stdout, stderr = first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && git merge-base --is-ancestor {shlex.quote(good_full)} {shlex.quote(bad_full)}",
+            timeout=first_host.ssh_connect_timeout,
+        )
+
+        if ret != 0:
+            # Check if the error is because they're on different branches
+            # or because the ancestry is reversed
+            ret_reverse, _stdout_reverse, _stderr_reverse = first_host.ssh.run_command(
+                f"cd {shlex.quote(kernel_path)} && git merge-base --is-ancestor {shlex.quote(bad_full)} {shlex.quote(good_full)}",
+                timeout=first_host.ssh_connect_timeout,
+            )
+
+            if ret_reverse == 0:
+                # Bad is ancestor of good - commits are swapped!
+                return (
+                    False,
+                    f"Commits appear to be SWAPPED!\n"
+                    f"The 'bad' commit ({self.bad_commit[:12]}) is actually an ancestor of\n"
+                    f"the 'good' commit ({self.good_commit[:12]}).\n\n"
+                    f"This means:\n"
+                    f"  - Your 'good' commit is the NEWER one (should be the broken version)\n"
+                    f"  - Your 'bad' commit is the OLDER one (should be the working version)\n\n"
+                    f"You need to SWAP them when calling kbisect init.",
+                )
+            else:
+                # Neither is an ancestor of the other - they're on different branches
+                return (
+                    False,
+                    f"Good commit ({self.good_commit[:12]}) is not an ancestor of bad commit ({self.bad_commit[:12]}).\n"
+                    f"This usually means they are on different, unrelated branches.\n\n"
+                    f"For bisection to work:\n"
+                    f"  - Good commit must be in the history of bad commit\n"
+                    f"  - Both commits should be on the same branch lineage\n\n"
+                    f"Git error: {stderr.strip()}",
+                )
+
+        logger.debug("Commit validation passed - good is ancestor of bad")
+        return (True, "")
 
     # ===========================================================================
     # Per-Host Helper Methods (for multi-host bisection)
@@ -1693,6 +1846,14 @@ class BisectMaster:
             logger.error(
                 "Failed to mark commit in git bisect - bisection state may be inconsistent"
             )
+            logger.error("")
+            logger.error("STOPPING BISECTION - Please fix the issue and restart")
+            logger.error("")
+            # Raise exception to stop bisection
+            raise RuntimeError(
+                "Git bisect failed to mark commit - likely due to incorrect bisect range. "
+                "See error messages above for details."
+            )
 
         return bisection_complete
 
@@ -1892,7 +2053,18 @@ class BisectMaster:
                 previous_commit = commit
 
             # Run iteration
-            iteration, bisection_complete = self.run_iteration(commit)
+            try:
+                iteration, bisection_complete = self.run_iteration(commit)
+            except RuntimeError:
+                # Git bisect error (e.g., merge base is bad)
+                logger.error("")
+                logger.error("Bisection cannot continue due to git bisect error")
+                self.state.update_session(
+                    self.session_id,
+                    status="failed",
+                    end_time=datetime.utcnow().isoformat(),
+                )
+                raise
 
             logger.info(f"Result: {iteration.result.value}")
 
@@ -2085,7 +2257,7 @@ class BisectMaster:
             hostname = host_manager.config.hostname
             kernel_path = host_manager.config.kernel_path
 
-            ret, _stdout, stderr = host_manager.ssh.run_command(
+            ret, _stdout, _stderr = host_manager.ssh.run_command(
                 f"cd {shlex.quote(kernel_path)} && git cat-file -t {shlex.quote(commit_full)}",
                 timeout=host_manager.ssh_connect_timeout,
             )
@@ -2104,7 +2276,9 @@ class BisectMaster:
             print("\nPossible solutions:")
             print("  1. Ensure all hosts have the latest commits: git fetch origin")
             print("  2. Check that kernel_path in bisect.yaml points to the correct repository")
-            print(f"  3. Verify the commit exists in your repository: git log --oneline | grep {commit_full[:SHORT_COMMIT_LENGTH]}")
+            print(
+                f"  3. Verify the commit exists in your repository: git log --oneline | grep {commit_full[:SHORT_COMMIT_LENGTH]}"
+            )
             logger.error(f"Commit validation failed on hosts: {', '.join(missing_hosts)}")
             return False
 
@@ -2150,9 +2324,7 @@ class BisectMaster:
                             "log_id": log_id,
                         }
                     except Exception as exc:
-                        logger.error(
-                            f"  [{host_manager.config.hostname}] Build exception: {exc}"
-                        )
+                        logger.error(f"  [{host_manager.config.hostname}] Build exception: {exc}")
                         build_results[host_manager.host_id] = {
                             "hostname": host_manager.config.hostname,
                             "success": False,
@@ -2163,9 +2335,7 @@ class BisectMaster:
                 # Mark any hosts without results as timed out
                 for host_manager in self.host_managers:
                     if host_manager.host_id not in build_results:
-                        logger.error(
-                            f"  [{host_manager.config.hostname}] Build timed out"
-                        )
+                        logger.error(f"  [{host_manager.config.hostname}] Build timed out")
                         build_results[host_manager.host_id] = {
                             "hostname": host_manager.config.hostname,
                             "success": False,
@@ -2234,14 +2404,11 @@ class BisectMaster:
             logger.info(f"  Installing dependencies on {hostname}...")
 
             ret, _stdout, stderr = host_manager.ssh.call_function(
-                "install_build_deps",
-                timeout=host_manager.ssh_connect_timeout
+                "install_build_deps", timeout=host_manager.ssh_connect_timeout
             )
 
             if ret != 0:
-                logger.warning(
-                    f"  Failed to install build dependencies on {hostname}: {stderr}"
-                )
+                logger.warning(f"  Failed to install build dependencies on {hostname}: {stderr}")
                 logger.warning("  Kernel builds may fail due to missing dependencies")
                 all_deps_installed = False
             else:
@@ -2264,22 +2431,25 @@ class BisectMaster:
         Returns:
             Cleaned error message
         """
-        lines = stderr.strip().split('\n')
+        lines = stderr.strip().split("\n")
 
         # Filter out SSH-related lines
         error_lines = []
         for line in lines:
             # Skip SSH warnings and known noise
-            if any(skip in line for skip in [
-                'Permanently added',
-                'Warning:',
-                'ECDSA',
-                'known_hosts',
-            ]):
+            if any(
+                skip in line
+                for skip in [
+                    "Permanently added",
+                    "Warning:",
+                    "ECDSA",
+                    "known_hosts",
+                ]
+            ):
                 continue
             error_lines.append(line)
 
-        return '\n'.join(error_lines) if error_lines else stderr
+        return "\n".join(error_lines) if error_lines else stderr
 
     def _resolve_commit_sha(self, commit_sha: str) -> Optional[str]:
         """Resolve short or full commit SHA to full SHA.
@@ -2312,10 +2482,14 @@ class BisectMaster:
             error_msg = stderr.strip()
 
             # Detect common issues and provide helpful hints
-            if "No such file or directory" in error_msg and ("cd:" in error_msg or kernel_path in error_msg):
+            if "No such file or directory" in error_msg and (
+                "cd:" in error_msg or kernel_path in error_msg
+            ):
                 logger.error(f"Kernel directory does not exist: {kernel_path}")
                 logger.error(f"Host: {first_host.config.hostname}")
-                logger.error("This shouldn't happen after auto-initialization - please report this issue")
+                logger.error(
+                    "This shouldn't happen after auto-initialization - please report this issue"
+                )
             elif "not a git repository" in error_msg.lower():
                 logger.error(f"Not a git repository: {kernel_path}")
                 logger.error("Please ensure the kernel_path points to a valid git repository")
