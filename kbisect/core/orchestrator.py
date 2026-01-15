@@ -777,6 +777,40 @@ class BisectMaster:
                 return False
             logger.info(f"  ✓ {hm.config.hostname} is reachable")
 
+        # Check kernel directories exist before validating commits
+        logger.info("Checking kernel directories...")
+        all_exist, missing_hosts = self._validate_kernel_directories()
+
+        if not all_exist:
+            logger.error("")
+            logger.error("=" * 70)
+            logger.error("KERNEL DIRECTORY NOT FOUND")
+            logger.error("=" * 70)
+            logger.error("")
+            logger.error("The following hosts are missing kernel directories:")
+            for hostname in missing_hosts:
+                # Find the kernel_path for this host
+                for hm in self.host_managers:
+                    if hm.config.hostname == hostname:
+                        logger.error(f"  - {hostname}: {hm.config.kernel_path}")
+                        break
+            logger.error("")
+
+            if self.config.kernel_repo_source:
+                logger.info("Auto-deploy is configured - will deploy kernel repository")
+                # Continue to deployment section below
+            else:
+                logger.error("No kernel_repo_source configured in bisect.yaml")
+                logger.error("")
+                logger.error("Solutions:")
+                logger.error("  1. Manually set up kernel repository on hosts")
+                logger.error("  2. Configure kernel_repo_source in bisect.yaml for auto-deploy")
+                logger.error("")
+                logger.error("=" * 70)
+                return False
+        else:
+            logger.info("✓ Kernel directories exist on all hosts")
+
         # Validate commits before starting bisection
         logger.info("Validating bisect commits...")
         is_valid, error_msg = self._validate_bisect_commits()
@@ -1100,6 +1134,8 @@ class BisectMaster:
     def _validate_bisect_commits(self) -> Tuple[bool, str]:
         """Validate that good/bad commits are correct for bisection.
 
+        Assumes kernel directories have already been verified to exist.
+
         Checks:
         - Both commits exist in the repository
         - Commits are different
@@ -1124,11 +1160,20 @@ class BisectMaster:
         )
 
         if ret != 0:
-            return (
-                False,
-                f"Good commit '{self.good_commit}' does not exist in the repository.\n"
-                f"Git error: {stderr.strip()}",
-            )
+            # Check if it's a directory issue vs commit issue
+            if "No such file or directory" in stderr and ("cd:" in stderr or kernel_path in stderr):
+                return (
+                    False,
+                    f"Kernel directory does not exist: {kernel_path}\n"
+                    f"This error should have been caught earlier - please report this bug.\n"
+                    f"Git error: {stderr.strip()}",
+                )
+            else:
+                return (
+                    False,
+                    f"Good commit '{self.good_commit}' does not exist in the repository.\n"
+                    f"Git error: {stderr.strip()}",
+                )
 
         good_full = stdout.strip()
         logger.debug(f"Good commit resolved to: {good_full}")
@@ -1140,11 +1185,20 @@ class BisectMaster:
         )
 
         if ret != 0:
-            return (
-                False,
-                f"Bad commit '{self.bad_commit}' does not exist in the repository.\n"
-                f"Git error: {stderr.strip()}",
-            )
+            # Check if it's a directory issue vs commit issue
+            if "No such file or directory" in stderr and ("cd:" in stderr or kernel_path in stderr):
+                return (
+                    False,
+                    f"Kernel directory does not exist: {kernel_path}\n"
+                    f"This error should have been caught earlier - please report this bug.\n"
+                    f"Git error: {stderr.strip()}",
+                )
+            else:
+                return (
+                    False,
+                    f"Bad commit '{self.bad_commit}' does not exist in the repository.\n"
+                    f"Git error: {stderr.strip()}",
+                )
 
         bad_full = stdout.strip()
         logger.debug(f"Bad commit resolved to: {bad_full}")
@@ -1197,6 +1251,33 @@ class BisectMaster:
 
         logger.debug("Commit validation passed - good is ancestor of bad")
         return (True, "")
+
+    def _validate_kernel_directories(self) -> Tuple[bool, List[str]]:
+        """Check if kernel directories exist on all hosts.
+
+        Returns:
+            Tuple of (all_exist, list_of_missing_hosts)
+        """
+        missing_hosts = []
+
+        for host_manager in self.host_managers:
+            hostname = host_manager.config.hostname
+            kernel_path = host_manager.config.kernel_path
+
+            # Check if directory exists and is a git repository
+            ret, _stdout, _stderr = host_manager.ssh.run_command(
+                f"test -d {shlex.quote(kernel_path)}/.git",
+                timeout=host_manager.ssh_connect_timeout,
+            )
+
+            if ret != 0:
+                logger.debug(f"  ✗ {hostname}: kernel directory not found")
+                missing_hosts.append(hostname)
+            else:
+                logger.debug(f"  ✓ {hostname}: kernel directory exists")
+
+        all_exist = len(missing_hosts) == 0
+        return (all_exist, missing_hosts)
 
     # ===========================================================================
     # Per-Host Helper Methods (for multi-host bisection)
