@@ -1167,7 +1167,10 @@ class BisectMaster:
         Checks:
         - Both commits exist in the repository
         - Commits are different
-        - Good commit is an ancestor of bad commit
+        - Commits share a common ancestor (merge base)
+
+        Note: Does NOT require strict linear ancestry. Git bisect can work
+        with commits on parallel branches as long as they share a merge base.
 
         Returns:
             Tuple of (is_valid, error_message). If is_valid is True, error_message is empty.
@@ -1239,45 +1242,41 @@ class BisectMaster:
                 "Bisection requires two different commits.",
             )
 
-        # Step 3: Check if good commit is an ancestor of bad commit
-        ret, _stdout, stderr = first_host.ssh.run_command(
-            f"cd {shlex.quote(kernel_path)} && git merge-base --is-ancestor {shlex.quote(good_full)} {shlex.quote(bad_full)}",
+        # Step 3: Check if commits have a valid merge base (common ancestor)
+        ret, stdout, stderr = first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && git merge-base {shlex.quote(good_full)} {shlex.quote(bad_full)}",
             timeout=first_host.ssh_connect_timeout,
         )
 
         if ret != 0:
-            # Check if the error is because they're on different branches
-            # or because the ancestry is reversed
-            ret_reverse, _stdout_reverse, _stderr_reverse = first_host.ssh.run_command(
-                f"cd {shlex.quote(kernel_path)} && git merge-base --is-ancestor {shlex.quote(bad_full)} {shlex.quote(good_full)}",
-                timeout=first_host.ssh_connect_timeout,
+            # No merge base found - commits are truly unrelated
+            return (
+                False,
+                f"Good and bad commits have no common ancestor.\n"
+                f"This means they are on completely unrelated histories.\n\n"
+                f"For bisection to work, commits must share a common ancestor.\n"
+                f"Git error: {stderr.strip()}",
             )
 
-            if ret_reverse == 0:
-                # Bad is ancestor of good - commits are swapped!
-                return (
-                    False,
-                    f"Commits appear to be SWAPPED!\n"
-                    f"The 'bad' commit ({self.bad_commit[:12]}) is actually an ancestor of\n"
-                    f"the 'good' commit ({self.good_commit[:12]}).\n\n"
-                    f"This means:\n"
-                    f"  - Your 'good' commit is the NEWER one (should be the broken version)\n"
-                    f"  - Your 'bad' commit is the OLDER one (should be the working version)\n\n"
-                    f"You need to SWAP them when calling kbisect init.",
-                )
-            else:
-                # Neither is an ancestor of the other - they're on different branches
-                return (
-                    False,
-                    f"Good commit ({self.good_commit[:12]}) is not an ancestor of bad commit ({self.bad_commit[:12]}).\n"
-                    f"This usually means they are on different, unrelated branches.\n\n"
-                    f"For bisection to work:\n"
-                    f"  - Good commit must be in the history of bad commit\n"
-                    f"  - Both commits should be on the same branch lineage\n\n"
-                    f"Git error: {stderr.strip()}",
-                )
+        merge_base = stdout.strip()
+        logger.debug(f"Merge base found: {merge_base}")
 
-        logger.debug("Commit validation passed - good is ancestor of bad")
+        # Optional: Check if commits are in reasonable order (warn but don't fail)
+        # Check if good commit is NEWER than bad commit (suspicious but not necessarily wrong)
+        ret_good_newer, _stdout, _stderr = first_host.ssh.run_command(
+            f"cd {shlex.quote(kernel_path)} && git merge-base --is-ancestor {shlex.quote(bad_full)} {shlex.quote(good_full)}",
+            timeout=first_host.ssh_connect_timeout,
+        )
+
+        if ret_good_newer == 0:
+            # Bad commit is ancestor of good - likely swapped
+            logger.warning("Unusual commit order detected:")
+            logger.warning("  The 'bad' commit appears older than the 'good' commit")
+            logger.warning("  You may have swapped good/bad commits")
+            logger.warning("  Proceeding anyway - git bisect will handle this")
+            # Don't fail - let git bisect handle it
+
+        logger.debug("Commit validation passed - commits share a merge base")
         return (True, "")
 
     def _validate_kernel_directories(self) -> Tuple[bool, List[str]]:
