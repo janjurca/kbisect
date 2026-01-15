@@ -781,6 +781,9 @@ class BisectMaster:
         logger.info("Checking kernel directories...")
         all_exist, missing_hosts = self._validate_kernel_directories()
 
+        # Flag to track if we need to validate commits later (after deployment)
+        need_commit_validation_after_deploy = False
+
         if not all_exist:
             logger.error("")
             logger.error("=" * 70)
@@ -798,7 +801,9 @@ class BisectMaster:
 
             if self.config.kernel_repo_source:
                 logger.info("Auto-deploy is configured - will deploy kernel repository")
-                # Continue to deployment section below
+                logger.info("Skipping commit validation until after deployment")
+                need_commit_validation_after_deploy = True
+                # Skip commit validation and go to deployment section
             else:
                 logger.error("No kernel_repo_source configured in bisect.yaml")
                 logger.error("")
@@ -811,27 +816,27 @@ class BisectMaster:
         else:
             logger.info("✓ Kernel directories exist on all hosts")
 
-        # Validate commits before starting bisection
-        logger.info("Validating bisect commits...")
-        is_valid, error_msg = self._validate_bisect_commits()
-        if not is_valid:
-            logger.error("")
-            logger.error("=" * 70)
-            logger.error("COMMIT VALIDATION FAILED")
-            logger.error("=" * 70)
-            logger.error("")
-            logger.error(error_msg)
-            logger.error("")
-            logger.error("Please check your good and bad commits:")
-            logger.error(f"  Good (should be older/working): {self.good_commit}")
-            logger.error(f"  Bad (should be newer/broken):   {self.bad_commit}")
-            logger.error("")
-            logger.error("Hint: You may have swapped the commits. Try:")
-            logger.error(f"  kbisect init {self.bad_commit} {self.good_commit}")
-            logger.error("=" * 70)
-            return False
+            # Validate commits only if directories already exist
+            logger.info("Validating bisect commits...")
+            is_valid, error_msg = self._validate_bisect_commits()
+            if not is_valid:
+                logger.error("")
+                logger.error("=" * 70)
+                logger.error("COMMIT VALIDATION FAILED")
+                logger.error("=" * 70)
+                logger.error("")
+                logger.error(error_msg)
+                logger.error("")
+                logger.error("Please check your good and bad commits:")
+                logger.error(f"  Good (should be older/working): {self.good_commit}")
+                logger.error(f"  Bad (should be newer/broken):   {self.bad_commit}")
+                logger.error("")
+                logger.error("Hint: You may have swapped the commits. Try:")
+                logger.error(f"  kbisect init {self.bad_commit} {self.good_commit}")
+                logger.error("=" * 70)
+                return False
 
-        logger.info("✓ Commits validated successfully")
+            logger.info("✓ Commits validated successfully")
 
         # Prepare and transfer kernel repository if configured
         if self.config.kernel_repo_source:
@@ -847,6 +852,29 @@ class BisectMaster:
                 return False
 
             logger.info("✓ Kernel repository deployed to all hosts")
+
+        # Validate commits after deployment if needed
+        if need_commit_validation_after_deploy:
+            logger.info("Validating bisect commits after deployment...")
+            is_valid, error_msg = self._validate_bisect_commits()
+            if not is_valid:
+                logger.error("")
+                logger.error("=" * 70)
+                logger.error("COMMIT VALIDATION FAILED")
+                logger.error("=" * 70)
+                logger.error("")
+                logger.error(error_msg)
+                logger.error("")
+                logger.error("Please check your good and bad commits:")
+                logger.error(f"  Good (should be older/working): {self.good_commit}")
+                logger.error(f"  Bad (should be newer/broken):   {self.bad_commit}")
+                logger.error("")
+                logger.error("Hint: You may have swapped the commits. Try:")
+                logger.error(f"  kbisect init {self.bad_commit} {self.good_commit}")
+                logger.error("=" * 70)
+                return False
+
+            logger.info("✓ Commits validated successfully")
 
         # Initialize git bisect (use first host since all share same git state)
         logger.info("Initializing git bisect...")
