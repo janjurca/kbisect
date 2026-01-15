@@ -1118,30 +1118,54 @@ class BisectMaster:
         if ret != 0:
             # Check for specific git bisect error indicating inverted range
             if "merge base" in stderr and "is bad" in stderr:
+                # Extract merge base SHA from error message if possible
+                merge_base_sha = "unknown"
+                try:
+                    parts = stderr.split()
+                    for i, part in enumerate(parts):
+                        if part == "base" and i + 1 < len(parts):
+                            merge_base_sha = parts[i + 1]
+                            break
+                except Exception:
+                    pass
+
                 logger.error(f"Failed to mark commit: {stderr}")
                 logger.error("")
                 logger.error("=" * 70)
-                logger.error("BISECT RANGE ERROR DETECTED")
+                logger.error("MERGE BASE IS BAD - CANNOT BISECT THIS RANGE")
                 logger.error("=" * 70)
                 logger.error("")
-                logger.error("Git bisect reports the merge base is bad. This usually means:")
+                logger.error("What this means:")
+                logger.error(
+                    "  The common ancestor (merge base) of your commits already has the bug."
+                )
+                logger.error("  This makes it impossible to bisect between them.")
+                logger.error("")
+                logger.error("Your commits:")
+                logger.error(f"  Good: {self.good_commit}")
+                logger.error(f"  Bad:  {self.bad_commit}")
+                logger.error(f"  Merge base: {merge_base_sha}")
+                logger.error("")
+                logger.error("Possible causes:")
                 logger.error("")
                 logger.error("1. SWAPPED COMMITS: Your good/bad commits are inverted")
-                logger.error("   - Current good: %s", self.good_commit[:12])
-                logger.error("   - Current bad:  %s", self.bad_commit[:12])
-                logger.error("   Solution: Swap the good and bad commits when reinitializing")
+                logger.error("   Solution: Swap them when reinitializing")
                 logger.error("")
-                logger.error("2. INVERTED TEST LOGIC: Your test script has reversed logic")
+                logger.error("2. WRONG 'GOOD' COMMIT: The bug exists at your 'good' commit too")
+                logger.error("   Solution: Find an OLDER commit where the bug doesn't exist")
+                logger.error("   Example: Test commits before the merge base")
+                logger.error("")
+                logger.error("3. BUG WAS FIXED THEN RE-INTRODUCED:")
+                logger.error("   - Merge base has bug (BAD)")
+                logger.error("   - Your 'good' commit has fix (GOOD)")
+                logger.error("   - Your 'bad' commit has bug again (BAD)")
+                logger.error("   Solution: Bisect in two stages:")
+                logger.error("     Stage 1: When was it fixed? (merge base → good)")
+                logger.error("     Stage 2: When was it re-broken? (good → bad)")
+                logger.error("")
+                logger.error("4. INVERTED TEST LOGIC: Your test script returns wrong exit codes")
                 logger.error("   - Should exit 0 when bug is ABSENT (good)")
                 logger.error("   - Should exit non-zero when bug is PRESENT (bad)")
-                logger.error("")
-                logger.error("3. BUG OUTSIDE RANGE: The regression is before the good commit")
-                logger.error("   - The bug may have been introduced earlier in history")
-                logger.error("   - Or it may have been fixed (not introduced) in your range")
-                logger.error("")
-                logger.error("NOTE: This error should have been caught during initialization.")
-                logger.error("If you see this, please re-run initialization with correct commits:")
-                logger.error("  kbisect init <good> <bad>")
                 logger.error("")
                 logger.error("=" * 70)
                 return (False, False)
@@ -2007,7 +2031,25 @@ class BisectMaster:
             # Phase 3 & 4: Test and aggregate
             bisection_complete = self._test_and_aggregate_phase(iteration_id, commit_sha, iteration)
 
+        except RuntimeError as exc:
+            # Critical git bisect errors - must stop immediately
+            logger.error("")
+            logger.error("=" * 70)
+            logger.error("CRITICAL BISECTION ERROR - STOPPING")
+            logger.error("=" * 70)
+            logger.error("")
+            logger.error(str(exc))
+            logger.error("")
+            logger.error("Bisection cannot continue. Session will be marked as failed.")
+            logger.error("")
+
+            iteration.result = TestResult.SKIP
+            iteration.error = str(exc)
+
+            # Re-raise to trigger session failure handling in run()
+            raise
         except Exception as exc:
+            # Other exceptions - can continue with skip
             logger.error(f"Multi-host iteration failed with exception: {exc}")
             iteration.result = TestResult.SKIP
             iteration.error = str(exc)
@@ -2166,7 +2208,17 @@ class BisectMaster:
             except RuntimeError:
                 # Git bisect error (e.g., merge base is bad)
                 logger.error("")
-                logger.error("Bisection cannot continue due to git bisect error")
+                logger.error("=" * 70)
+                logger.error("BISECTION STOPPED DUE TO GIT BISECT ERROR")
+                logger.error("=" * 70)
+                logger.error("")
+                logger.error("Session has been marked as FAILED.")
+                logger.error("")
+                logger.error("To restart bisection:")
+                logger.error("  1. Review the error messages above")
+                logger.error("  2. Fix the issue (adjust commits, fix test script, etc.)")
+                logger.error("  3. Run: kbisect init <good> <bad>")
+                logger.error("")
                 self.state.update_session(
                     self.session_id,
                     status="failed",
