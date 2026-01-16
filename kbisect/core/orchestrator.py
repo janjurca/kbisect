@@ -1138,6 +1138,23 @@ class BisectMaster:
 
                 if ret_fix == 0:
                     logger.info("✓ Git index successfully recovered")
+                    logger.info("Cleaning working directory...")
+
+                    # Clean working directory to match build_kernel() flow
+                    # Step 1: Discard all tracked file changes with git reset --hard HEAD
+                    # Step 2: Remove untracked files with git clean -fd
+                    ret_clean, stdout_clean, stderr_clean = first_host.ssh.run_command(
+                        f"cd {shlex.quote(kernel_path)} && "
+                        f"git reset --hard HEAD && "
+                        f"git clean -fd",
+                        timeout=first_host.ssh_connect_timeout,
+                    )
+
+                    if ret_clean != 0:
+                        logger.warning(f"Working directory cleanup had warnings: {stderr_clean}")
+                        # Continue anyway - warnings are non-fatal
+                        logger.info("Continuing with bisect retry...")
+
                     logger.info("Retrying git bisect command...")
 
                     # Retry the original bisect command
@@ -1162,8 +1179,9 @@ class BisectMaster:
                     logger.error(f"  1. SSH to {first_host.config.hostname}")
                     logger.error(f"  2. cd {kernel_path}")
                     logger.error("  3. rm -f .git/index .git/index.lock")
-                    logger.error("  4. git reset")
-                    logger.error("  5. Restart bisection")
+                    logger.error("  4. git reset --hard HEAD")
+                    logger.error("  5. git clean -fd")
+                    logger.error("  6. Restart bisection")
                     return (False, False)
 
             # Tier 2: Check for specific git bisect error indicating inverted range
