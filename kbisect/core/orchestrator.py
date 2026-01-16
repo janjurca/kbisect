@@ -1111,13 +1111,63 @@ class BisectMaster:
         first_host = self.host_managers[0]
         kernel_path = first_host.config.kernel_path
 
+        logger.debug(f"Executing: cd {kernel_path} && {bisect_cmd}")
         ret, stdout, stderr = first_host.ssh.run_command(
             f"cd {shlex.quote(kernel_path)} && {bisect_cmd}", timeout=first_host.ssh_connect_timeout
         )
 
         if ret != 0:
-            # Check for specific git bisect error indicating inverted range
-            if "merge base" in stderr and "is bad" in stderr:
+            # Tier 1: Check for git index corruption (recoverable)
+            if any(
+                pattern in stderr
+                for pattern in [
+                    "index file smaller than expected",
+                    "index file corrupt",
+                    "bad index",
+                ]
+            ):
+                logger.warning(f"Git index corruption detected: {stderr}")
+                logger.info("Attempting automatic recovery...")
+
+                # Call fix_git_index_corruption bash function
+                ret_fix, stdout_fix, stderr_fix = first_host.ssh.call_function(
+                    "fix_git_index_corruption",
+                    kernel_path,
+                    timeout=first_host.ssh_connect_timeout,
+                )
+
+                if ret_fix == 0:
+                    logger.info("✓ Git index successfully recovered")
+                    logger.info("Retrying git bisect command...")
+
+                    # Retry the original bisect command
+                    ret, stdout, stderr = first_host.ssh.run_command(
+                        f"cd {shlex.quote(kernel_path)} && {bisect_cmd}",
+                        timeout=first_host.ssh_connect_timeout,
+                    )
+
+                    # If retry succeeds, continue with normal flow
+                    if ret == 0:
+                        # Success - will be handled by existing code below
+                        pass
+                    else:
+                        logger.error("Git bisect failed even after index recovery")
+                        logger.error(f"Error: {stderr}")
+                        return (False, False)
+                else:
+                    logger.error("✗ Failed to recover git index")
+                    logger.error(f"Recovery error: {stderr_fix}")
+                    logger.error("")
+                    logger.error("Manual intervention required:")
+                    logger.error(f"  1. SSH to {first_host.config.hostname}")
+                    logger.error(f"  2. cd {kernel_path}")
+                    logger.error("  3. rm -f .git/index .git/index.lock")
+                    logger.error("  4. git reset")
+                    logger.error("  5. Restart bisection")
+                    return (False, False)
+
+            # Tier 2: Check for specific git bisect error indicating inverted range
+            elif "merge base" in stderr and "is bad" in stderr:
                 # Extract merge base SHA from error message if possible
                 merge_base_sha = "unknown"
                 try:
@@ -1169,8 +1219,15 @@ class BisectMaster:
                 logger.error("")
                 logger.error("=" * 70)
                 return (False, False)
+
+            # Tier 3: Generic git bisect failure
             else:
                 logger.error(f"Failed to mark commit: {stderr}")
+                logger.error("")
+                logger.error("This may be due to:")
+                logger.error("  - Incorrect bisect range (commits swapped or invalid)")
+                logger.error("  - Git repository issues")
+                logger.error("  - Filesystem or permission problems")
                 return (False, False)
 
         # Check if bisection just completed
@@ -1983,7 +2040,7 @@ class BisectMaster:
             logger.error("")
             # Raise exception to stop bisection
             raise RuntimeError(
-                "Git bisect failed to mark commit - likely due to incorrect bisect range. "
+                "Git bisect failed to mark commit. "
                 "See error messages above for details."
             )
 
