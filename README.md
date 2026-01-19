@@ -292,21 +292,51 @@ else
 fi
 ```
 
-Configure the test script in your bisect.yaml:
+Configure the test in your bisect.yaml:
 
+**Single-host example:**
 ```yaml
+# Enable custom testing mode
 test:
   type: custom
-  script: ./test-network.sh  # Path to your test script
+
+# Specify test script for the host
+hosts:
+  - hostname: 192.168.1.100
+    ssh_user: root
+    kernel_path: /root/kernel
+    test_script: ./test-network.sh  # Custom test script
+```
+
+**Multi-host example (different tests per host):**
+```yaml
+# Enable custom testing mode
+test:
+  type: custom
+
+# Each host can run a different test script
+hosts:
+  - hostname: server1.example.com
+    ssh_user: root
+    kernel_path: /root/kernel
+    test_script: ./test-server.sh   # Server-specific test
+
+  - hostname: client1.example.com
+    ssh_user: root
+    kernel_path: /root/kernel
+    test_script: ./test-client.sh   # Client-specific test
 ```
 
 Then run bisection:
 
 ```bash
-chmod +x test-network.sh
+chmod +x test-network.sh  # Make test script executable
+# (or test-server.sh and test-client.sh for multi-host)
 kbisect init v6.1 v6.6
 kbisect start
 ```
+
+**Note:** The global `test: type: custom` enables custom testing mode, while per-host `test_script:` specifies which script to run on each host. This allows different hosts to run different test scripts (e.g., server vs. client roles).
 
 **Note:** When using custom tests, kernels that fail to boot are automatically marked as SKIP (can't test functionality if kernel doesn't boot).
 
@@ -416,10 +446,13 @@ kbisect build abc123def456789abc123def456789abc123def45
 - ✓ Validates commit exists on all hosts
 - ✓ Builds kernel in parallel on all configured hosts
 - ✓ Applies configured kernel config (if any)
-- ✗ Does NOT install the kernel
+- ✓ Installs kernel to /boot (runs `make modules_install` and `make install`)
+- ✗ Does NOT set one-time boot (no grub-reboot)
 - ✗ Does NOT reboot hosts
 - ✗ Does NOT run tests
 - ✗ Does NOT require `kbisect init` first
+
+**Important:** The kernel is installed to `/boot` but won't be the default boot option until you manually configure it or reboot and select it from the boot menu.
 
 **View Build Logs:**
 
@@ -671,12 +704,14 @@ protection:
   verify_protected_after_cleanup: true  # Verify protection after cleanup
 
 # Test configuration
-tests:
-  - type: boot                      # Boot success test (always runs)
+test:
+  type: boot  # "boot" (just check if boots) or "custom" (run test scripts)
 
-  - type: custom                    # Custom test script
-    path: /root/kernel_build_and_install/reproducers/my-test.sh
-    enabled: false
+# When type is "custom", specify test scripts per-host in the hosts array
+# Example:
+# hosts:
+#   - hostname: 192.168.1.100
+#     test_script: /root/reproducers/my-test.sh  # Script to run on this host
 
 # Cleanup strategy
 cleanup:
