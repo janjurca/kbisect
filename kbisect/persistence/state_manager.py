@@ -6,7 +6,6 @@ Migrated from raw sqlite3 to SQLAlchemy 2.0 for better type safety and maintaina
 """
 
 import gzip
-import hashlib
 import json
 import logging
 from dataclasses import asdict, dataclass
@@ -20,9 +19,13 @@ from sqlalchemy.orm import scoped_session, sessionmaker
 from kbisect.persistence.models import (
     Base,
     BuildLog,
+    Host,
     Iteration,
+    IterationResult,
     Log,
     Metadata,
+)
+from kbisect.persistence.models import (
     Session as SessionModel,
 )
 
@@ -142,11 +145,64 @@ class StateManager:
         try:
             # Create all tables if they don't exist
             Base.metadata.create_all(self.engine)
+
+            # Run migrations for existing databases
+            self._run_migrations()
+
             logger.debug(f"Database initialized at {self.db_path}")
         except Exception as exc:
             msg = f"Failed to initialize database: {exc}"
             logger.error(msg)
             raise DatabaseError(msg) from exc
+
+    def _run_migrations(self) -> None:
+        """Run database migrations for schema changes.
+
+        Adds new columns to existing tables if they don't exist.
+        This ensures backward compatibility with existing databases.
+        """
+        import sqlite3
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            # Migration: Add host_id to logs table
+            cursor.execute("PRAGMA table_info(logs)")
+            logs_columns = [col[1] for col in cursor.fetchall()]
+            if "host_id" not in logs_columns:
+                logger.info("Adding host_id column to logs table")
+                cursor.execute(
+                    "ALTER TABLE logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)"
+                )
+                conn.commit()
+
+            # Migration: Add host_id to build_logs table
+            cursor.execute("PRAGMA table_info(build_logs)")
+            build_logs_columns = [col[1] for col in cursor.fetchall()]
+            if "host_id" not in build_logs_columns:
+                logger.info("Adding host_id column to build_logs table")
+                cursor.execute(
+                    "ALTER TABLE build_logs ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)"
+                )
+                conn.commit()
+
+            # Migration: Add host_id to metadata table
+            cursor.execute("PRAGMA table_info(metadata)")
+            metadata_columns = [col[1] for col in cursor.fetchall()]
+            if "host_id" not in metadata_columns:
+                logger.info("Adding host_id column to metadata table")
+                cursor.execute(
+                    "ALTER TABLE metadata ADD COLUMN host_id INTEGER REFERENCES hosts(host_id)"
+                )
+                conn.commit()
+
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"Migration failed: {exc}")
+            raise
+        finally:
+            conn.close()
 
     def create_session(
         self, good_commit: str, bad_commit: str, config: Optional[Dict[str, Any]] = None
@@ -525,13 +581,342 @@ class StateManager:
         finally:
             session.close()
 
-    def add_log(self, iteration_id: int, log_type: str, message: str) -> None:
+    def create_host(
+        self,
+        session_id: int,
+        hostname: str,
+        ssh_user: str,
+        kernel_path: str,
+        bisect_path: str,
+        test_script: str,
+        power_control_type: Optional[str] = "ipmi",
+        ipmi_host: Optional[str] = None,
+        ipmi_user: Optional[str] = None,
+        ipmi_password: Optional[str] = None,
+    ) -> int:
+        """Create new host configuration.
+
+        Args:
+            session_id: Parent session ID
+            hostname: Hostname or IP address
+            ssh_user: SSH username
+            kernel_path: Path to kernel directory on host
+            bisect_path: Path to bisect scripts on host
+            test_script: Path to test script for this host
+            power_control_type: Power control method ("ipmi", "beaker", or None)
+            ipmi_host: Optional IPMI hostname
+            ipmi_user: Optional IPMI username
+            ipmi_password: Optional IPMI password
+
+        Returns:
+            Host ID
+
+        Raises:
+            DatabaseError: If host creation fails
+        """
+        session = self.Session()
+        try:
+            new_host = Host(
+                session_id=session_id,
+                hostname=hostname,
+                ssh_user=ssh_user,
+                kernel_path=kernel_path,
+                bisect_path=bisect_path,
+                test_script=test_script,
+                power_control_type=power_control_type,
+                ipmi_host=ipmi_host,
+                ipmi_user=ipmi_user,
+                ipmi_password=ipmi_password,
+            )
+
+            session.add(new_host)
+            session.commit()
+            host_id = new_host.host_id
+
+            logger.info(f"Created host {host_id}: {hostname}")
+            return host_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create host: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def get_hosts(self, session_id: int) -> List[Dict[str, Any]]:
+        """Get all hosts for a session.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            List of host dictionaries
+        """
+        session = self.Session()
+        try:
+            stmt = select(Host).where(Host.session_id == session_id).order_by(Host.host_id)
+            results = session.execute(stmt).scalars().all()
+
+            return [
+                {
+                    "host_id": host.host_id,
+                    "session_id": host.session_id,
+                    "hostname": host.hostname,
+                    "ssh_user": host.ssh_user,
+                    "kernel_path": host.kernel_path,
+                    "bisect_path": host.bisect_path,
+                    "test_script": host.test_script,
+                    "ipmi_host": host.ipmi_host,
+                    "ipmi_user": host.ipmi_user,
+                    "ipmi_password": host.ipmi_password,
+                }
+                for host in results
+            ]
+        finally:
+            session.close()
+
+    def get_host(self, host_id: int) -> Optional[Dict[str, Any]]:
+        """Get host by ID.
+
+        Args:
+            host_id: Host ID
+
+        Returns:
+            Host dictionary or None if not found
+        """
+        session = self.Session()
+        try:
+            stmt = select(Host).where(Host.host_id == host_id)
+            host = session.execute(stmt).scalar_one_or_none()
+
+            if not host:
+                return None
+
+            return {
+                "host_id": host.host_id,
+                "session_id": host.session_id,
+                "hostname": host.hostname,
+                "ssh_user": host.ssh_user,
+                "kernel_path": host.kernel_path,
+                "bisect_path": host.bisect_path,
+                "test_script": host.test_script,
+                "ipmi_host": host.ipmi_host,
+                "ipmi_user": host.ipmi_user,
+                "ipmi_password": host.ipmi_password,
+            }
+        finally:
+            session.close()
+
+    def create_iteration_result(
+        self,
+        iteration_id: int,
+        host_id: int,
+        build_result: Optional[str] = None,
+        boot_result: Optional[str] = None,
+        test_result: Optional[str] = None,
+        final_result: Optional[str] = None,
+        error_message: Optional[str] = None,
+        test_output: Optional[str] = None,
+    ) -> int:
+        """Create per-host iteration result.
+
+        Args:
+            iteration_id: Iteration ID
+            host_id: Host ID
+            build_result: Build result (success, failure)
+            boot_result: Boot result (success, failure, timeout)
+            test_result: Test result (pass, fail)
+            final_result: Final verdict (good, bad, skip)
+            error_message: Optional error message
+            test_output: Optional test output
+
+        Returns:
+            Result ID
+
+        Raises:
+            DatabaseError: If result creation fails
+        """
+        session = self.Session()
+        try:
+            new_result = IterationResult(
+                iteration_id=iteration_id,
+                host_id=host_id,
+                build_result=build_result,
+                boot_result=boot_result,
+                test_result=test_result,
+                final_result=final_result,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_message=error_message,
+                test_output=test_output,
+            )
+
+            session.add(new_result)
+            session.commit()
+            result_id = new_result.result_id
+
+            logger.debug(f"Created iteration result {result_id} for host {host_id}")
+            return result_id
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create iteration result: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def create_iteration_results_bulk(self, results: List[Dict[str, Any]]) -> List[int]:
+        """Create multiple per-host iteration results in a single transaction.
+
+        Args:
+            results: List of result dictionaries, each containing:
+                - iteration_id: Iteration ID
+                - host_id: Host ID
+                - build_result: Build result (success, failure)
+                - boot_result: Boot result (success, failure, timeout)
+                - test_result: Test result (pass, fail)
+                - final_result: Final verdict (good, bad, skip)
+                - error_message: Optional error message
+                - test_output: Optional test output
+
+        Returns:
+            List of result IDs
+
+        Raises:
+            DatabaseError: If bulk creation fails
+        """
+        session = self.Session()
+        try:
+            result_ids = []
+            current_timestamp = datetime.now(timezone.utc).isoformat()
+
+            for result_data in results:
+                new_result = IterationResult(
+                    iteration_id=result_data["iteration_id"],
+                    host_id=result_data["host_id"],
+                    build_result=result_data.get("build_result"),
+                    boot_result=result_data.get("boot_result"),
+                    test_result=result_data.get("test_result"),
+                    final_result=result_data.get("final_result"),
+                    timestamp=current_timestamp,
+                    error_message=result_data.get("error_message"),
+                    test_output=result_data.get("test_output"),
+                )
+                session.add(new_result)
+
+            # Commit all results at once
+            session.commit()
+
+            # Get result IDs after commit
+            for obj in session.new:
+                if isinstance(obj, IterationResult):
+                    result_ids.append(obj.result_id)
+
+            logger.debug(f"Created {len(result_ids)} iteration results in bulk")
+            return result_ids
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to create iteration results in bulk: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def update_iteration_result(self, result_id: int, **kwargs: Any) -> None:
+        """Update iteration result fields.
+
+        Args:
+            result_id: Result ID to update
+            **kwargs: Fields to update
+
+        Raises:
+            DatabaseError: If update fails
+        """
+        session = self.Session()
+        try:
+            stmt = select(IterationResult).where(IterationResult.result_id == result_id)
+            db_result = session.execute(stmt).scalar_one_or_none()
+
+            if not db_result:
+                logger.warning(f"IterationResult {result_id} not found for update")
+                return
+
+            # Update allowed fields
+            valid_fields = {
+                "build_result",
+                "boot_result",
+                "test_result",
+                "final_result",
+                "error_message",
+                "test_output",
+            }
+            for field, value in kwargs.items():
+                if field in valid_fields:
+                    setattr(db_result, field, value)
+
+            # Update timestamp
+            db_result.timestamp = datetime.now(timezone.utc).isoformat()
+
+            session.commit()
+
+        except Exception as exc:
+            session.rollback()
+            msg = f"Failed to update iteration result: {exc}"
+            logger.error(msg)
+            raise DatabaseError(msg) from exc
+        finally:
+            session.close()
+
+    def get_iteration_results(self, iteration_id: int) -> List[Dict[str, Any]]:
+        """Get all per-host results for an iteration.
+
+        Args:
+            iteration_id: Iteration ID
+
+        Returns:
+            List of result dictionaries with host information
+        """
+        session = self.Session()
+        try:
+            stmt = (
+                select(IterationResult, Host)
+                .join(Host, IterationResult.host_id == Host.host_id)
+                .where(IterationResult.iteration_id == iteration_id)
+                .order_by(Host.host_id)
+            )
+            results = session.execute(stmt).all()
+
+            return [
+                {
+                    "result_id": result.result_id,
+                    "iteration_id": result.iteration_id,
+                    "host_id": result.host_id,
+                    "hostname": host.hostname,
+                    "build_result": result.build_result,
+                    "boot_result": result.boot_result,
+                    "test_result": result.test_result,
+                    "final_result": result.final_result,
+                    "timestamp": result.timestamp,
+                    "error_message": result.error_message,
+                    "test_output": result.test_output,
+                }
+                for result, host in results
+            ]
+        finally:
+            session.close()
+
+    def add_log(
+        self, iteration_id: int, log_type: str, message: str, host_id: Optional[int] = None
+    ) -> None:
         """Add log entry for an iteration.
 
         Args:
             iteration_id: Iteration ID
             log_type: Type of log entry
             message: Log message
+            host_id: Optional host ID to link log to specific machine
 
         Raises:
             DatabaseError: If log creation fails
@@ -540,6 +925,7 @@ class StateManager:
         try:
             new_log = Log(
                 iteration_id=iteration_id,
+                host_id=host_id,
                 log_type=log_type,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 message=message,
@@ -567,11 +953,7 @@ class StateManager:
         """
         session = self.Session()
         try:
-            stmt = (
-                select(Log)
-                .where(Log.iteration_id == iteration_id)
-                .order_by(Log.timestamp)
-            )
+            stmt = select(Log).where(Log.iteration_id == iteration_id).order_by(Log.timestamp)
             results = session.execute(stmt).scalars().all()
 
             return [
@@ -588,7 +970,11 @@ class StateManager:
             session.close()
 
     def create_build_log(
-        self, iteration_id: int, log_type: str, initial_content: str = ""
+        self,
+        iteration_id: int,
+        log_type: str,
+        initial_content: str = "",
+        host_id: Optional[int] = None,
     ) -> int:
         """Create initial build log entry for streaming.
 
@@ -596,6 +982,7 @@ class StateManager:
             iteration_id: Iteration ID
             log_type: Type of log (build, boot, test)
             initial_content: Optional initial log content (e.g., header)
+            host_id: Optional host ID to link log to specific machine
 
         Returns:
             Log ID
@@ -606,11 +993,14 @@ class StateManager:
         session = self.Session()
         try:
             # Compress initial content if provided
-            compressed_content = gzip.compress(initial_content.encode("utf-8")) if initial_content else b""
+            compressed_content = (
+                gzip.compress(initial_content.encode("utf-8")) if initial_content else b""
+            )
             size_bytes = len(compressed_content)
 
             new_log = BuildLog(
                 iteration_id=iteration_id,
+                host_id=host_id,
                 log_type=log_type,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 log_content=compressed_content,
@@ -634,9 +1024,7 @@ class StateManager:
         finally:
             session.close()
 
-    def append_build_log_chunk(
-        self, log_id: int, chunk: str
-    ) -> None:
+    def append_build_log_chunk(self, log_id: int, chunk: str) -> None:
         """Append content to existing build log.
 
         Args:
@@ -659,7 +1047,9 @@ class StateManager:
             if build_log.compressed and build_log.log_content:
                 existing_content = gzip.decompress(build_log.log_content).decode("utf-8")
             else:
-                existing_content = build_log.log_content.decode("utf-8") if build_log.log_content else ""
+                existing_content = (
+                    build_log.log_content.decode("utf-8") if build_log.log_content else ""
+                )
 
             # Append new chunk
             updated_content = existing_content + chunk
@@ -670,7 +1060,9 @@ class StateManager:
             build_log.size_bytes = len(compressed_content)
 
             session.commit()
-            logger.debug(f"Appended {len(chunk)} bytes to log {log_id} (total compressed: {len(compressed_content)} bytes)")
+            logger.debug(
+                f"Appended {len(chunk)} bytes to log {log_id} (total compressed: {len(compressed_content)} bytes)"
+            )
 
         except Exception as exc:
             session.rollback()
@@ -680,9 +1072,7 @@ class StateManager:
         finally:
             session.close()
 
-    def finalize_build_log(
-        self, log_id: int, exit_code: int
-    ) -> None:
+    def finalize_build_log(self, log_id: int, exit_code: int) -> None:
         """Finalize build log with exit code.
 
         Args:
@@ -852,8 +1242,9 @@ class StateManager:
         session = self.Session()
         try:
             stmt = (
-                select(BuildLog, Iteration)
+                select(BuildLog, Iteration, Host)
                 .join(Iteration, BuildLog.iteration_id == Iteration.iteration_id)
+                .outerjoin(Host, BuildLog.host_id == Host.host_id)
             )
 
             # Add filters
@@ -867,21 +1258,25 @@ class StateManager:
             results = session.execute(stmt).all()
 
             logs = []
-            for build_log, iteration in results:
-                logs.append({
-                    "log_id": build_log.log_id,
-                    "iteration_id": build_log.iteration_id,
-                    "iteration_num": iteration.iteration_num,
-                    "commit_sha": iteration.commit_sha,
-                    "log_type": build_log.log_type,
-                    "timestamp": build_log.timestamp,
-                    "size_bytes": build_log.size_bytes,
-                    "exit_code": build_log.exit_code,
-                    "status": (
-                        "RUNNING" if build_log.exit_code is None
-                        else ("SUCCESS" if build_log.exit_code == 0 else "FAILED")
-                    ),
-                })
+            for build_log, iteration, host in results:
+                logs.append(
+                    {
+                        "log_id": build_log.log_id,
+                        "iteration_id": build_log.iteration_id,
+                        "iteration_num": iteration.iteration_num,
+                        "commit_sha": iteration.commit_sha,
+                        "log_type": build_log.log_type,
+                        "timestamp": build_log.timestamp,
+                        "size_bytes": build_log.size_bytes,
+                        "exit_code": build_log.exit_code,
+                        "hostname": host.hostname if host else None,
+                        "status": (
+                            "RUNNING"
+                            if build_log.exit_code is None
+                            else ("SUCCESS" if build_log.exit_code == 0 else "FAILED")
+                        ),
+                    }
+                )
 
             return logs
         finally:
@@ -892,6 +1287,7 @@ class StateManager:
         session_id: int,
         metadata_dict: Dict[str, Any],
         iteration_id: Optional[int] = None,
+        host_id: Optional[int] = None,
     ) -> int:
         """Store metadata in database.
 
@@ -899,6 +1295,7 @@ class StateManager:
             session_id: Session ID
             metadata_dict: Metadata dictionary
             iteration_id: Optional iteration ID
+            host_id: Optional host ID to link metadata to specific machine
 
         Returns:
             Metadata ID
@@ -915,6 +1312,7 @@ class StateManager:
             new_metadata = Metadata(
                 session_id=session_id,
                 iteration_id=iteration_id,
+                host_id=host_id,
                 collection_time=metadata_dict.get(
                     "collection_time", datetime.now(timezone.utc).isoformat()
                 ),
@@ -1036,7 +1434,8 @@ class StateManager:
         session = self.Session()
         try:
             stmt = (
-                select(Metadata)
+                select(Metadata, Host)
+                .outerjoin(Host, Metadata.host_id == Host.host_id)
                 .where(Metadata.session_id == session_id)
                 .order_by(Metadata.collection_time)
             )
@@ -1044,24 +1443,27 @@ class StateManager:
             if collection_type:
                 stmt = stmt.where(Metadata.collection_type == collection_type)
 
-            results = session.execute(stmt).scalars().all()
+            results = session.execute(stmt).all()
 
             metadata_list = []
-            for meta in results:
+            for meta, host in results:
                 # Try to parse as JSON, otherwise use raw string
                 try:
                     metadata_content = json.loads(meta.data)
                 except (json.JSONDecodeError, ValueError):
                     metadata_content = meta.data
 
-                metadata_list.append({
-                    "metadata_id": meta.metadata_id,
-                    "session_id": meta.session_id,
-                    "iteration_id": meta.iteration_id,
-                    "collection_time": meta.collection_time,
-                    "collection_type": meta.collection_type,
-                    "metadata": metadata_content,
-                })
+                metadata_list.append(
+                    {
+                        "metadata_id": meta.metadata_id,
+                        "session_id": meta.session_id,
+                        "iteration_id": meta.iteration_id,
+                        "collection_time": meta.collection_time,
+                        "collection_type": meta.collection_type,
+                        "hostname": host.hostname if host else None,
+                        "metadata": metadata_content,
+                    }
+                )
 
             return metadata_list
         finally:
@@ -1085,7 +1487,8 @@ class StateManager:
         iteration_id: Optional[int],
         file_type: str,
         file_content: str,
-        **extra_metadata: Any,
+        host_id: Optional[int] = None,
+        **_extra_metadata: Any,
     ) -> int:
         """Store file as a metadata record with collection_type='file'.
 
@@ -1094,6 +1497,7 @@ class StateManager:
             iteration_id: Iteration ID (None for session-level files)
             file_type: Type of file (e.g., 'kernel_config')
             file_content: File content as text
+            host_id: Optional host ID to link metadata to specific machine
             **extra_metadata: Additional metadata to include in JSON
 
         Returns:
@@ -1111,6 +1515,7 @@ class StateManager:
             new_metadata = Metadata(
                 session_id=session_id,
                 iteration_id=iteration_id,
+                host_id=host_id,
                 collection_time=datetime.now(timezone.utc).isoformat(),
                 collection_type=file_type,  # Use file_type as collection_type (e.g., 'kernel_config')
                 data=file_content,  # Store raw file content directly

@@ -13,16 +13,48 @@
 #   vim bisect.yaml  # customize
 #   kbisect init v6.1 v6.6
 
-# Slave machine configuration
-slave:
-  hostname: 192.168.1.100           # Slave machine IP or hostname
-  ssh_user: root                     # SSH user for slave access
-  kernel_path: /root/kernel          # Path to kernel source on slave
-  bisect_path: /root/kernel-bisect/lib  # Path where bisect library will be deployed
+# ============================================================================
+# MULTI-HOST CONFIGURATION (REQUIRED)
+# ============================================================================
+# For networking bugs or hardware-specific issues requiring multiple hosts
+# Each host can run a different test script (e.g., server vs. client role)
+# All hosts must pass their tests for a commit to be marked GOOD
+#
+# For single-host bisection, simply configure one host in the array
+
+hosts:
+  - hostname: 192.168.1.100          # First host (e.g., server or single host)
+    ssh_user: root                    # SSH user for this host
+    kernel_path: /root/kernel         # Path to kernel source on this host
+    bisect_path: /root/kernel-bisect/lib  # Path to bisect library
+    test_script: test-server.sh       # Role-specific test script (or test.sh for single host)
+
+    # Power control configuration (per-host)
+    # Options: "ipmi", "beaker", or null (SSH reboot fallback)
+    # Default: "ipmi" if not specified
+    power_control_type: ipmi          # Use IPMI for power control
+
+    # IPMI configuration (required if power_control_type is "ipmi")
+    ipmi_host: 192.168.1.101          # IPMI interface for this host
+    ipmi_user: admin
+    ipmi_password: changeme
+
+  # Example: Second host for multi-host testing (remove if only testing one host)
+  # This example shows Beaker power control
+  - hostname: server2.example.com    # Second host (e.g., client)
+    ssh_user: root
+    kernel_path: /root/kernel
+    bisect_path: /root/kernel-bisect/lib
+    test_script: test-client.sh       # Different test script for client role
+
+    # Use Beaker for power control (requires bkr client installed and Kerberos auth)
+    power_control_type: beaker        # Use Beaker lab automation for power control
+    # Note: Beaker uses the hostname for system identification
+    # Ensure you're authenticated (kinit) before running bisection
 
 # Kernel repository (optional - automatic repository deployment)
-# If configured, the repository will be cloned/copied on master and transferred to slave
-# This eliminates the need to manually clone the kernel source on the slave
+# If configured, the repository will be cloned/copied on master and transferred to all hosts
+# This eliminates the need to manually clone the kernel source on the hosts
 kernel_repo:
   # Git repository URL or local filesystem path
   # Examples:
@@ -36,32 +68,23 @@ kernel_repo:
   # Examples: main, master, linux-6.6.y
   branch: null
 
-# Deployment configuration (automatic slave setup)
-# Note: Slave verification always happens before bisection
+# Deployment configuration (automatic host setup)
+# Note: Host verification always happens before bisection
 deployment:
-  auto_deploy: true                  # Automatically deploy to slave if not set up
-
-# IPMI configuration (for power control and recovery)
-ipmi:
-  host: 192.168.1.101               # IPMI interface IP
-  username: admin                    # IPMI username
-  password: changeme                 # IPMI password (use keyring in production)
+  auto_deploy: true                  # Automatically deploy to all hosts if not set up
 
 # Timeouts (in seconds)
 timeouts:
-  boot: 300                          # Boot timeout
+  boot: 600                          # Boot timeout
   test: 600                          # Test timeout
-  build: 1800                        # Build timeout (30 minutes)
+  build: 3600                        # Build timeout (60 minutes)
+  ssh_connect: 30                    # SSH timeout for connection establishment and command execution
 
 # Kernel configuration
 kernel_config:
   # Path to base .config file (optional)
-  # If not specified and use_running_config is false, kernel defaults are used
+  # If not specified, kernel defaults are used
   config_file: null
-
-  # Use running kernel's config as base (default: false)
-  # If both config_file and use_running_config are set, config_file takes precedence
-  use_running_config: false
 
 # Test configuration
 # Note: Current kernel is always protected and cannot be deleted during cleanup
@@ -90,7 +113,7 @@ metadata:
 console_logs:
   enabled: false                    # Enable console log collection during boot
   collector: "auto"                 # "conserver" | "ipmi" | "auto"
-  # Override hostname for console connection (default: slave hostname)
+  # Override hostname for console connection (default: first host's hostname)
   hostname: null
   # Fall back to IPMI SOL if conserver fails
   fallback_to_ipmi: true

@@ -5,18 +5,15 @@ Defines database schema using SQLAlchemy declarative models.
 Compatible with existing sqlite3 schema for backward compatibility.
 """
 
-from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import (
     BLOB,
     Boolean,
-    Column,
     ForeignKey,
     Integer,
     String,
     Text,
-    create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -43,7 +40,9 @@ class Session(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="running")
     result_commit: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     config: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON as TEXT
-    session_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Bisection state JSON
+    session_state: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # Bisection state JSON
 
     # Relationships
     iterations: Mapped[List["Iteration"]] = relationship(
@@ -51,6 +50,9 @@ class Session(Base):
     )
     metadata_records: Mapped[List["Metadata"]] = relationship(
         "Metadata", back_populates="session", cascade="all, delete-orphan"
+    )
+    hosts: Mapped[List["Host"]] = relationship(
+        "Host", back_populates="session", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
@@ -69,7 +71,9 @@ class Iteration(Base):
     __tablename__ = "iterations"
 
     iteration_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("sessions.session_id"), nullable=False)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sessions.session_id"), nullable=False
+    )
     iteration_num: Mapped[int] = mapped_column(Integer, nullable=False)
     commit_sha: Mapped[str] = mapped_column(String, nullable=False)
     commit_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -91,6 +95,9 @@ class Iteration(Base):
     build_logs: Mapped[List["BuildLog"]] = relationship(
         "BuildLog", back_populates="iteration", cascade="all, delete-orphan"
     )
+    iteration_results: Mapped[List["IterationResult"]] = relationship(
+        "IterationResult", back_populates="iteration", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return (
@@ -108,13 +115,19 @@ class Log(Base):
     __tablename__ = "logs"
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
+    iteration_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("iterations.iteration_id"), nullable=False
+    )
+    host_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("hosts.host_id"), nullable=True
+    )
     log_type: Mapped[str] = mapped_column(String, nullable=False)
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Relationships
     iteration: Mapped["Iteration"] = relationship("Iteration", back_populates="logs")
+    host: Mapped[Optional["Host"]] = relationship("Host")
 
     def __repr__(self) -> str:
         return f"<Log(id={self.log_id}, type={self.log_type}, iteration={self.iteration_id})>"
@@ -129,7 +142,12 @@ class BuildLog(Base):
     __tablename__ = "build_logs"
 
     log_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    iteration_id: Mapped[int] = mapped_column(Integer, ForeignKey("iterations.iteration_id"), nullable=False)
+    iteration_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("iterations.iteration_id"), nullable=False
+    )
+    host_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("hosts.host_id"), nullable=True
+    )
     log_type: Mapped[str] = mapped_column(String, nullable=False)
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
     log_content: Mapped[bytes] = mapped_column(BLOB, nullable=False)
@@ -139,6 +157,7 @@ class BuildLog(Base):
 
     # Relationships
     iteration: Mapped["Iteration"] = relationship("Iteration", back_populates="build_logs")
+    host: Mapped[Optional["Host"]] = relationship("Host")
 
     def __repr__(self) -> str:
         return (
@@ -157,9 +176,14 @@ class Metadata(Base):
     __tablename__ = "metadata"
 
     metadata_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("sessions.session_id"), nullable=False)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sessions.session_id"), nullable=False
+    )
     iteration_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("iterations.iteration_id"), nullable=True
+    )
+    host_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("hosts.host_id"), nullable=True
     )
     collection_time: Mapped[str] = mapped_column(String, nullable=False)
     collection_type: Mapped[str] = mapped_column(String, nullable=False)
@@ -167,9 +191,78 @@ class Metadata(Base):
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="metadata_records")
+    host: Mapped[Optional["Host"]] = relationship("Host")
 
     def __repr__(self) -> str:
         return (
             f"<Metadata(id={self.metadata_id}, type={self.collection_type}, "
             f"session={self.session_id})>"
+        )
+
+
+class Host(Base):
+    """Host configuration model for multi-host bisection.
+
+    Represents a single host/machine participating in the bisection.
+    Each host can have its own test script and configuration.
+    """
+
+    __tablename__ = "hosts"
+
+    host_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sessions.session_id"), nullable=False
+    )
+    hostname: Mapped[str] = mapped_column(String, nullable=False)
+    ssh_user: Mapped[str] = mapped_column(String, nullable=False, default="root")
+    kernel_path: Mapped[str] = mapped_column(String, nullable=False)
+    bisect_path: Mapped[str] = mapped_column(String, nullable=False)
+    test_script: Mapped[str] = mapped_column(String, nullable=False)
+    power_control_type: Mapped[Optional[str]] = mapped_column(String, nullable=True, default="ipmi")
+    ipmi_host: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ipmi_user: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ipmi_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Relationships
+    session: Mapped["Session"] = relationship("Session", back_populates="hosts")
+    iteration_results: Mapped[List["IterationResult"]] = relationship(
+        "IterationResult", back_populates="host", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Host(id={self.host_id}, hostname={self.hostname}, test_script={self.test_script})>"
+        )
+
+
+class IterationResult(Base):
+    """Per-host test result for a single iteration.
+
+    In multi-host mode, each iteration can have multiple results - one per host.
+    All hosts must pass for the iteration to be marked as GOOD.
+    """
+
+    __tablename__ = "iteration_results"
+
+    result_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    iteration_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("iterations.iteration_id"), nullable=False
+    )
+    host_id: Mapped[int] = mapped_column(Integer, ForeignKey("hosts.host_id"), nullable=False)
+    build_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    boot_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    test_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    final_result: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    timestamp: Mapped[str] = mapped_column(String, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    test_output: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    iteration: Mapped["Iteration"] = relationship("Iteration", back_populates="iteration_results")
+    host: Mapped["Host"] = relationship("Host", back_populates="iteration_results")
+
+    def __repr__(self) -> str:
+        return (
+            f"<IterationResult(id={self.result_id}, iteration={self.iteration_id}, "
+            f"host={self.host_id}, result={self.final_result})>"
         )

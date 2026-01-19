@@ -5,7 +5,6 @@ Handles copying scripts, installing services, and initializing the slave machine
 """
 
 import logging
-import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -54,6 +53,7 @@ class SlaveDeployer:
         slave_user: str = "root",
         deploy_path: str = DEFAULT_DEPLOY_PATH,
         local_lib_path: Optional[str] = None,
+        connect_timeout: int = 15,
     ) -> None:
         """Initialize slave deployer.
 
@@ -62,11 +62,13 @@ class SlaveDeployer:
             slave_user: SSH username (defaults to root)
             deploy_path: Deployment path on slave
             local_lib_path: Local library path (auto-detected if None)
+            connect_timeout: SSH connection timeout in seconds
         """
         self.slave_host = slave_host
         self.slave_user = slave_user
         self.deploy_path = deploy_path
-        self.ssh_client = SSHClient(slave_host, slave_user)
+        self.connect_timeout = connect_timeout
+        self.ssh_client = SSHClient(slave_host, slave_user, connect_timeout)
 
         # Determine local library path
         if local_lib_path:
@@ -113,8 +115,8 @@ class SlaveDeployer:
         """
         try:
             # Step 1: Create remote directory structure
-            remote_dir = os.path.dirname(remote_path)
-            ret, _, stderr = self._ssh_command(f"mkdir -p {shlex.quote(remote_dir)}")
+            remote_dir = Path(remote_path).parent
+            ret, _, stderr = self._ssh_command(f"mkdir -p {shlex.quote(str(remote_dir))}")
             if ret != 0:
                 logger.error(f"Failed to create remote directory: {stderr}")
                 return False
@@ -124,12 +126,14 @@ class SlaveDeployer:
                 "rsync",
                 "-az",  # Archive mode (preserves permissions, times, etc.) + compression
                 "-e",
-                "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10",
+                f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout={self.connect_timeout}",
                 local_path,
                 f"{self.slave_user}@{self.slave_host}:{remote_path}",
             ]
 
-            result = subprocess.run(rsync_cmd, capture_output=True, text=True, timeout=60, check=False)
+            result = subprocess.run(
+                rsync_cmd, capture_output=True, text=True, timeout=60, check=False
+            )
             if result.returncode == 0:
                 return True
 
@@ -139,7 +143,7 @@ class SlaveDeployer:
         except subprocess.TimeoutExpired:
             msg = "File transfer timed out"
             logger.error(msg)
-            raise TransferError(msg)
+            raise TransferError(msg) from None
         except Exception as exc:
             msg = f"File transfer error: {exc}"
             logger.error(msg)
@@ -154,7 +158,7 @@ class SlaveDeployer:
         logger.info(f"Checking SSH connectivity to {self.slave_host}...")
 
         try:
-            ret, stdout, stderr = self._ssh_command("echo test", timeout=10)
+            ret, stdout, stderr = self._ssh_command("echo test", timeout=self.connect_timeout)
         except SSHError:
             logger.error("✗ SSH connectivity failed")
             return False
@@ -254,9 +258,7 @@ class SlaveDeployer:
         logger.info("Initializing kernel protection...")
 
         # Call init_protection function from library
-        init_command = (
-            f"source {self.deploy_path}/bisect-functions.sh && init_protection"
-        )
+        init_command = f"source {self.deploy_path}/bisect-functions.sh && init_protection"
 
         try:
             ret, stdout, stderr = self._ssh_command(init_command, timeout=60)
@@ -309,9 +311,7 @@ class SlaveDeployer:
 
         # Check 3: Protection initialized
         try:
-            ret, _, _ = self._ssh_command(
-                f"test -f {DEFAULT_STATE_DIR}/protected-kernels.list"
-            )
+            ret, _, _ = self._ssh_command(f"test -f {DEFAULT_STATE_DIR}/protected-kernels.list")
             if ret == 0:
                 checks.append("✓ Kernel protection initialized")
             else:
@@ -371,7 +371,7 @@ class SlaveDeployer:
             return False
 
         # Step 5: Verify deployment
-        success, checks = self.verify_deployment()
+        success, _checks = self.verify_deployment()
 
         if success:
             logger.info("=" * 60)
@@ -446,7 +446,7 @@ def main() -> int:
     if args.check_only:
         if deployer.is_deployed():
             print("Slave is deployed")
-            success, checks = deployer.verify_deployment()
+            success, _checks = deployer.verify_deployment()
             return 0 if success else 1
 
         print("Slave is NOT deployed")

@@ -25,16 +25,19 @@ class SSHClient(RemoteClient):
     Attributes:
         host: Slave hostname or IP
         user: SSH username
+        connect_timeout: SSH connection timeout in seconds
     """
 
-    def __init__(self, host: str, user: str = "root") -> None:
+    def __init__(self, host: str, user: str = "root", connect_timeout: int = 15) -> None:
         """Initialize SSH client.
 
         Args:
             host: Slave hostname or IP
             user: SSH username
+            connect_timeout: SSH connection timeout in seconds
         """
         super().__init__(host, user)
+        self.connect_timeout = connect_timeout
 
     def run_command(self, command: str, timeout: Optional[int] = None) -> Tuple[int, str, str]:
         """Run command on slave via SSH.
@@ -51,13 +54,15 @@ class SSHClient(RemoteClient):
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=10",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.user}@{self.host}",
             command,
         ]
 
         try:
-            result = subprocess.run(ssh_command, capture_output=True, text=True, timeout=timeout, check=False)
+            result = subprocess.run(
+                ssh_command, capture_output=True, text=True, timeout=timeout, check=False
+            )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
             logger.error(f"SSH command timed out after {timeout}s")
@@ -123,7 +128,7 @@ class SSHClient(RemoteClient):
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=10",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.user}@{self.host}",
             command,
         ]
@@ -187,6 +192,17 @@ class SSHClient(RemoteClient):
             logger.error(f"SSH streaming command failed: {exc}")
             return -1, "", str(exc)
 
+    def is_alive(self) -> bool:
+        """Check if slave is reachable via SSH.
+
+        Uses the configured connect_timeout instead of hardcoded default.
+
+        Returns:
+            True if host is reachable, False otherwise
+        """
+        ret, _, _ = self.run_command("echo alive", timeout=self.connect_timeout)
+        return ret == 0
+
     def copy_file(self, local_path: str, remote_path: str) -> bool:
         """Copy file to slave.
 
@@ -201,6 +217,8 @@ class SSHClient(RemoteClient):
             "scp",
             "-o",
             "StrictHostKeyChecking=no",
+            "-o",
+            f"ConnectTimeout={self.connect_timeout}",
             local_path,
             f"{self.user}@{self.host}:{remote_path}",
         ]

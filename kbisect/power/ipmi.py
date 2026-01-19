@@ -4,11 +4,13 @@
 Handles power control, serial console access, and boot device configuration.
 """
 
+import contextlib
 import logging
 import os
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from kbisect.power.base import (
@@ -16,6 +18,7 @@ from kbisect.power.base import (
     PowerController,
     PowerState,
 )
+from kbisect.remote.ssh import SSHClient
 
 
 logger = logging.getLogger(__name__)
@@ -50,17 +53,28 @@ class IPMIController(PowerController):
         password: IPMI password for authentication
     """
 
-    def __init__(self, host: str, user: str, password: str) -> None:
+    def __init__(
+        self,
+        host: str,
+        user: str,
+        password: str,
+        ssh_host: Optional[str] = None,
+        ssh_connect_timeout: int = 15,
+    ) -> None:
         """Initialize IPMI controller.
 
         Args:
             host: IPMI interface hostname or IP address
             user: IPMI username
             password: IPMI password
+            ssh_host: SSH hostname for reboot verification (defaults to host if not provided)
+            ssh_connect_timeout: SSH connection timeout in seconds
         """
         self.host = host
         self.user = user
         self.password = password
+        self.ssh_host = ssh_host or host
+        self.ssh_connect_timeout = ssh_connect_timeout
 
     def _run_ipmi_command(
         self, args: List[str], timeout: int = DEFAULT_IPMI_TIMEOUT
@@ -89,7 +103,7 @@ class IPMIController(PowerController):
                 os.close(fd)
 
             # Set restrictive permissions (only owner can read)
-            os.chmod(password_file, 0o600)
+            Path(password_file).chmod(0o600)
 
             cmd = [
                 "ipmitool",
@@ -101,7 +115,8 @@ class IPMIController(PowerController):
                 self.user,
                 "-f",
                 password_file,
-            ] + args
+                *args,
+            ]
 
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout, check=False
@@ -118,14 +133,14 @@ class IPMIController(PowerController):
             raise IPMICommandError(msg) from exc
         finally:
             # Clean up password file - CRITICAL for security
-            if password_file and os.path.exists(password_file):
+            if password_file and Path(password_file).exists():
                 # Try multiple times with increasing force
                 deleted = False
                 for attempt in range(3):
                     try:
                         # Ensure file is writable before deletion
-                        os.chmod(password_file, 0o600)
-                        os.unlink(password_file)
+                        Path(password_file).chmod(0o600)
+                        Path(password_file).unlink()
                         deleted = True
                         break
                     except OSError as e:
@@ -141,9 +156,11 @@ class IPMIController(PowerController):
                 if not deleted:
                     # Last resort: try to zero out the file content
                     try:
-                        with open(password_file, 'w') as f:
-                            f.write('')
-                        logger.warning(f"Zeroed out password file {password_file} but could not delete it")
+                        with Path(password_file).open("w") as f:
+                            f.write("")
+                        logger.warning(
+                            f"Zeroed out password file {password_file} but could not delete it"
+                        )
                     except Exception as zero_exc:
                         logger.error(f"Failed to zero out password file: {zero_exc}")
 
@@ -178,7 +195,7 @@ class IPMIController(PowerController):
         logger.info("Powering on system via IPMI...")
 
         try:
-            ret, stdout, stderr = self._run_ipmi_command(["power", "on"])
+            ret, _stdout, stderr = self._run_ipmi_command(["power", "on"])
         except IPMIError:
             return False
 
@@ -202,9 +219,9 @@ class IPMIController(PowerController):
 
         try:
             if force:
-                ret, stdout, stderr = self._run_ipmi_command(["power", "off"])
+                ret, _stdout, stderr = self._run_ipmi_command(["power", "off"])
             else:
-                ret, stdout, stderr = self._run_ipmi_command(["power", "soft"])
+                ret, _stdout, stderr = self._run_ipmi_command(["power", "soft"])
         except IPMIError:
             return False
 
@@ -246,13 +263,27 @@ class IPMIController(PowerController):
     def reset(self) -> bool:
         """Reset (hard reboot) the system.
 
+        Creates a temporary SSH connection to verify shutdown after sending
+        the reset command. This handles the asynchronous nature of IPMI reset
+        where the command returns before the actual reboot starts.
+
         Returns:
-            True if reset command succeeded, False otherwise
+            True if reset command succeeded and shutdown confirmed,
+            False otherwise
         """
         logger.info("Resetting system via IPMI...")
 
+        # Create temporary SSH client for shutdown verification
+        ssh_client = SSHClient(self.ssh_host, user="root", connect_timeout=self.ssh_connect_timeout)
+
+        # Pre-reboot connectivity check
+        logger.info("Verifying SSH connectivity before reboot...")
+        if not ssh_client.is_alive():
+            logger.warning("SSH not responsive before reboot - machine may already be down")
+
+        # Send reset command
         try:
-            ret, stdout, stderr = self._run_ipmi_command(["power", "reset"])
+            ret, _stdout, stderr = self._run_ipmi_command(["power", "reset"])
         except IPMIError:
             return False
 
@@ -261,7 +292,25 @@ class IPMIController(PowerController):
             return False
 
         logger.info("✓ Reset command sent")
-        return True
+
+        # Wait for shutdown
+        logger.info("Waiting for machine to shut down...")
+        shutdown_timeout = 120  # Fixed timeout to prevent infinite loop
+        shutdown_poll_interval = 2
+        start_time = time.time()
+
+        while time.time() - start_time < shutdown_timeout:
+            if not ssh_client.is_alive():
+                elapsed = time.time() - start_time
+                logger.info(f"✓ Machine shutdown confirmed after {elapsed:.1f}s")
+                return True
+            time.sleep(shutdown_poll_interval)
+
+        # Timeout reached - shutdown not confirmed
+        logger.warning(
+            f"Shutdown not confirmed within {shutdown_timeout}s - machine may still be up or reboot pending"
+        )
+        return False
 
     def set_boot_device(self, device: BootDevice, persistent: bool = False) -> bool:
         """Set next boot device.
@@ -280,7 +329,7 @@ class IPMIController(PowerController):
             args.append("options=efiboot")
 
         try:
-            ret, stdout, stderr = self._run_ipmi_command(args)
+            ret, _stdout, stderr = self._run_ipmi_command(args)
         except IPMIError:
             return False
 
@@ -298,9 +347,7 @@ class IPMIController(PowerController):
             Boot device name or None if unable to determine
         """
         try:
-            ret, stdout, stderr = self._run_ipmi_command(
-                ["chassis", "bootparam", "get", "5"]
-            )
+            ret, stdout, stderr = self._run_ipmi_command(["chassis", "bootparam", "get", "5"])
         except IPMIError:
             return None
 
@@ -314,6 +361,54 @@ class IPMIController(PowerController):
                 return line.split(":")[-1].strip()
 
         return None
+
+    def health_check(self) -> dict:
+        """Perform health check on IPMI controller.
+
+        Validates:
+        - ipmitool command availability
+        - Connection and authentication to IPMI interface
+        - Ability to query power status
+
+        Returns:
+            Dictionary with health check results
+        """
+        import shutil
+
+        result = {"healthy": False, "checks": []}
+
+        # Check if ipmitool is installed
+        ipmitool_path = shutil.which("ipmitool")
+        if not ipmitool_path:
+            result["error"] = "ipmitool command not found in PATH"
+            result["checks"].append({"name": "ipmitool", "passed": False})
+            return result
+
+        result["tool_path"] = ipmitool_path
+        result["checks"].append({"name": "ipmitool", "passed": True})
+
+        # Test connection and credentials by querying power status
+        try:
+            power_state = self.get_power_status()
+
+            if power_state == PowerState.UNKNOWN:
+                result["error"] = (
+                    "Could not determine power status (connection or authentication failed)"
+                )
+                result["checks"].append({"name": "connectivity", "passed": False})
+                return result
+
+            result["power_status"] = power_state.value
+            result["checks"].append({"name": "connectivity", "passed": True})
+            result["checks"].append({"name": "authentication", "passed": True})
+            result["healthy"] = True
+
+        except Exception as e:
+            result["error"] = f"Failed to communicate with IPMI interface: {e!s}"
+            result["checks"].append({"name": "connectivity", "passed": False})
+            return result
+
+        return result
 
     def get_sensor_data(self) -> Optional[str]:
         """Get sensor data (temperature, fans, etc.).
@@ -342,9 +437,7 @@ class IPMIController(PowerController):
             SEL log content or None if unable to retrieve
         """
         try:
-            ret, stdout, stderr = self._run_ipmi_command(
-                ["sel", "list", "last", str(lines)]
-            )
+            ret, stdout, stderr = self._run_ipmi_command(["sel", "list", "last", str(lines)])
         except IPMIError:
             return None
 
@@ -363,7 +456,7 @@ class IPMIController(PowerController):
         logger.info("Clearing SEL log...")
 
         try:
-            ret, stdout, stderr = self._run_ipmi_command(["sel", "clear"])
+            ret, _stdout, stderr = self._run_ipmi_command(["sel", "clear"])
         except IPMIError:
             return False
 
@@ -391,9 +484,7 @@ class IPMIController(PowerController):
             time.sleep(1)
 
             # Activate SOL
-            ret, stdout, stderr = self._run_ipmi_command(
-                ["sol", "activate"], timeout=duration
-            )
+            _ret, stdout, _stderr = self._run_ipmi_command(["sol", "activate"], timeout=duration)
 
             return stdout
 
@@ -402,12 +493,10 @@ class IPMIController(PowerController):
             return None
         finally:
             # Deactivate SOL
-            try:
+            with contextlib.suppress(IPMIError):
                 self._run_ipmi_command(["sol", "deactivate"], timeout=SOL_DEACTIVATE_TIMEOUT)
-            except IPMIError:
-                pass  # Best effort cleanup
 
-    def force_safe_boot(self, safe_kernel_path: str = "/boot/vmlinuz-production") -> bool:
+    def force_safe_boot(self, _safe_kernel_path: str = "/boot/vmlinuz-production") -> bool:
         """Force boot to safe kernel.
 
         This is used when the test kernel fails to boot.

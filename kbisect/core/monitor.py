@@ -57,17 +57,22 @@ class SlaveMonitor:
     Attributes:
         slave_host: Hostname or IP address of slave machine
         slave_user: SSH username for slave access
+        connect_timeout: SSH connection timeout in seconds
     """
 
-    def __init__(self, slave_host: str, slave_user: str = "root") -> None:
+    def __init__(
+        self, slave_host: str, slave_user: str = "root", connect_timeout: int = 15
+    ) -> None:
         """Initialize slave monitor.
 
         Args:
             slave_host: Slave hostname or IP address
             slave_user: SSH username (defaults to root)
+            connect_timeout: SSH connection timeout in seconds
         """
         self.slave_host = slave_host
         self.slave_user = slave_user
+        self.connect_timeout = connect_timeout
 
     def ping(self, timeout: int = DEFAULT_PING_TIMEOUT) -> bool:
         """Check if slave responds to ping.
@@ -104,7 +109,7 @@ class SlaveMonitor:
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=5",
+            f"ConnectTimeout={self.connect_timeout}",
             "-o",
             "BatchMode=yes",
             f"{self.slave_user}@{self.slave_host}",
@@ -136,7 +141,7 @@ class SlaveMonitor:
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=5",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.slave_user}@{self.slave_host}",
             "uname -r",
         ]
@@ -165,7 +170,7 @@ class SlaveMonitor:
             "-o",
             "StrictHostKeyChecking=no",
             "-o",
-            "ConnectTimeout=5",
+            f"ConnectTimeout={self.connect_timeout}",
             f"{self.slave_user}@{self.slave_host}",
             "uptime -p",
         ]
@@ -293,118 +298,6 @@ class SlaveMonitor:
 
         logger.error("Boot failed or timed out")
         return False, None
-
-
-class SerialConsoleMonitor:
-    """Monitor serial console for kernel panics and boot issues.
-
-    Uses IPMI Serial Over LAN (SOL) to capture console output and detect
-    kernel panics, boot hangs, and other issues.
-
-    Attributes:
-        ipmi_host: IPMI interface hostname or IP
-        ipmi_user: IPMI username
-        ipmi_password: IPMI password
-    """
-
-    def __init__(self, ipmi_host: str, ipmi_user: str, ipmi_password: str) -> None:
-        """Initialize serial console monitor.
-
-        Args:
-            ipmi_host: IPMI interface hostname or IP
-            ipmi_user: IPMI username
-            ipmi_password: IPMI password
-        """
-        self.ipmi_host = ipmi_host
-        self.ipmi_user = ipmi_user
-        self.ipmi_password = ipmi_password
-
-    def capture_console_log(self, duration: int = 30) -> Optional[str]:
-        """Capture serial console output via IPMI SOL (Serial Over LAN).
-
-        Args:
-            duration: How long to capture output in seconds
-
-        Returns:
-            Console output or None if capture failed
-        """
-        try:
-            # Activate SOL
-            cmd = [
-                "ipmitool",
-                "-I",
-                "lanplus",
-                "-H",
-                self.ipmi_host,
-                "-U",
-                self.ipmi_user,
-                "-P",
-                self.ipmi_password,
-                "sol",
-                "activate",
-            ]
-
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=duration, check=False
-            )
-
-            return result.stdout
-
-        except subprocess.TimeoutExpired as exc:
-            # Timeout is expected for continuous monitoring
-            return exc.stdout.decode() if exc.stdout else None
-        except Exception as exc:
-            logger.error(f"Failed to capture console: {exc}")
-            return None
-
-    def check_for_panic(self, console_output: str) -> bool:
-        """Check if console output contains kernel panic.
-
-        Args:
-            console_output: Console text to analyze
-
-        Returns:
-            True if panic detected, False otherwise
-        """
-        panic_patterns = [
-            "Kernel panic",
-            "kernel panic",
-            "Oops:",
-            "BUG:",
-            "general protection fault",
-            "unable to handle kernel",
-            "Call Trace:",
-        ]
-
-        for pattern in panic_patterns:
-            if pattern in console_output:
-                logger.error(f"Detected kernel issue: {pattern}")
-                return True
-
-        return False
-
-    def check_boot_stuck(self, console_output: str) -> bool:
-        """Check if boot appears to be stuck.
-
-        Args:
-            console_output: Console text to analyze
-
-        Returns:
-            True if boot appears stuck, False otherwise
-        """
-        stuck_patterns = [
-            "waiting for device",
-            "timed out waiting for",
-            "Failed to mount",
-            "A start job is running",
-        ]
-
-        for pattern in stuck_patterns:
-            if pattern in console_output:
-                logger.warning(f"Boot may be stuck: {pattern}")
-                return True
-
-        return False
 
 
 def main() -> int:

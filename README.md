@@ -123,7 +123,48 @@ kbisect status
 kbisect report
 ```
 
-The default test checks if the kernel boots successfully (filesystem writable, SSH available).
+The report will show the **first bad commit** - the exact commit that introduced the problem.
+
+### Using a Custom Kernel Config
+
+**Problem:** Different kernel versions have different config options. You want consistent builds.
+
+**Solution:** Provide a base `.config` file.
+
+**Option 1: Use a specific config file**
+
+```bash
+# Save your known-good config from slave to master
+scp root@<slave-ip>:/boot/config-$(uname -r) /tmp/my-config
+
+# Configure it in bisect.yaml
+cat > bisect.yaml <<EOF
+kernel_config:
+  config_file: /tmp/my-config  # Path on master machine (will be transferred to slave)
+EOF
+
+kbisect start
+```
+
+**Option 2: Relative path in config file**
+
+```yaml
+# bisect.yaml (in your bisection directory)
+kernel_config:
+  config_file: my-baseline.config  # Relative to config file location
+```
+
+**How it works:**
+1. Config file is read from **master machine**
+2. File is automatically transferred to slave during initialization
+3. Base `.config` is copied to kernel source on slave
+4. `make olddefconfig` runs (handles new/removed options automatically)
+5. New options get default values (non-interactive - no prompts!)
+6. Kernel builds with consistent config
+
+### Running Custom Tests
+
+**Default test (no test script specified):**
 
 ### Custom Test Script
 
@@ -265,7 +306,63 @@ kbisect -v -c my-config.yaml start
 
 ## Advanced Usage
 
-### Use specific kernel config
+# Kernel configuration
+kernel_config:
+  # Path to base .config file on master machine (optional)
+  # Can be absolute or relative to config file location
+  # File will be automatically transferred to slave during initialization
+  # If not specified, kernel defaults are used
+  config_file: null
+
+# Kernel protection
+protection:
+  auto_lock_current_kernel: true    # Lock current kernel at init
+  verify_protected_after_cleanup: true  # Verify protection after cleanup
+
+# Test configuration
+tests:
+  - type: boot                      # Boot success test (always runs)
+
+  - type: custom                    # Custom test script
+    path: /root/kernel_build_and_install/reproducers/my-test.sh
+    enabled: false
+
+# Cleanup strategy
+cleanup:
+  mode: aggressive                  # aggressive | conservative
+  only_delete_bisect_tagged: true  # Only delete kernels tagged with -bisect-
+  verify_before_delete: true       # Triple-check before deletion
+
+# State and Database (per-directory isolation)
+# Default: files stored in current working directory
+database_path: bisect.db            # SQLite database file (default: ./bisect.db)
+state_dir: .                        # Directory for metadata/configs (default: current directory)
+
+# Metadata collection
+metadata:
+  collect_baseline: true            # Collect system metadata at session start
+  collect_per_iteration: true       # Collect kernel metadata per iteration
+  collect_kernel_config: true       # Include kernel .config in metadata
+  collect_packages: true            # Include rpm -qa / dpkg -l
+  compress_large_data: true         # Gzip large metadata files
+  # Note: Metadata is stored in state_dir (default: current directory)
+
+# Console log collection (captures boot process output)
+console_logs:
+  enabled: false                    # Enable console log collection during boot
+  collector: "auto"                 # "conserver" | "ipmi" | "auto"
+  # Override hostname for console connection (default: uses slave hostname)
+  hostname: null
+  # Fall back to IPMI SOL if conserver fails (default: true)
+  fallback_to_ipmi: true
+  # Console logs are stored in database (build_logs table, log_type="console")
+  # View with: kbisect logs list --log-type console
+  # Requires: 'console' command (conserver) or IPMI configured
+
+# Note: Application logs are printed to terminal (stdout/stderr)
+# Use --verbose flag for DEBUG level output: kbisect --verbose start
+# Build logs and console logs are stored in the database (see console_logs above)
+```
 
 Configure kernel config in your bisect.yaml before running init:
 
@@ -347,8 +444,260 @@ kbisect ipmi off
 ### Deployment options
 
 ```bash
-# Verify deployment without making changes
-kbisect deploy --verify-only
+# At init, current running kernel is protected
+# Protected file list: /var/lib/kernel-bisect/protected-kernels.list
+# Contains:
+#   /boot/vmlinuz-6.5.0-production
+#   /boot/initramfs-6.5.0-production.img
+#   /lib/modules/6.5.0-production/
+```
+
+### Triple Verification Before Deletion
+
+Every cleanup operation checks:
+
+1. ✓ Is file in protected list?
+2. ✓ Is this the currently running kernel?
+3. ✓ Does filename contain "-bisect-" tag?
+4. ✓ Final confirmation before deletion
+5. ✓ Verify protected kernels still exist after cleanup
+
+### State Persistence
+
+**SQLite database** stores complete state:
+
+- Session info (good/bad commits, status)
+- All iterations (commit, result, duration, errors)
+- Metadata (system info, kernel configs)
+- Logs (detailed per-iteration logs)
+
+**Location:** `./bisect.db` (in your bisection directory)
+
+**Survives:**
+- Master machine crashes/reboots
+- Network interruptions
+- Power failures (slave reboots to safe kernel)
+- Manual cancellation
+
+### Non-Interactive Builds
+
+**Kernel config handling:**
+
+- Uses `make olddefconfig` (not `make oldconfig`)
+- New config options get defaults automatically
+- **No prompts** - fully automated
+- Supports custom base configs for consistency
+
+---
+
+## Architecture
+
+### System Design
+
+**Master-Slave Architecture:**
+
+- **Master**: Python orchestration engine, CLI interface, state management
+- **Slave**: Bash library with functions, no autonomous processes
+- **Communication**: SSH only (no HTTP, no agents, no daemons)
+
+**Why this design?**
+
+- ✅ Simple: One bash library file on slave
+- ✅ Stateless slave: Master controls everything
+- ✅ Reliable: SSH is mature and well-tested
+- ✅ Secure: Standard SSH authentication and encryption
+- ✅ Maintainable: All logic in master Python code
+
+### Data Flow
+
+```
+1. Master: kbisect init v6.1 v6.6
+   ↓
+2. Master: Check if slave deployed
+   ↓
+3. Master: Deploy lib/bisect-functions.sh to slave
+   ↓
+4. Master: SSH call: init_protection()
+   ↓
+5. Master: Create session in SQLite
+   ↓
+6. Master: Collect baseline metadata
+   ↓
+7. Loop: For each commit from git bisect
+   ├─ Master: SSH call: build_kernel(commit_sha)
+   ├─ Slave: Build kernel, install, set one-time boot (grub-reboot)
+   ├─ Master: Store build log in SQLite (gzip compressed)
+   ├─ Master: Start console log collection (if enabled) - conserver or IPMI SOL
+   ├─ Master: Reboot slave
+   ├─ Master: Wait for SSH (boot detection)
+   ├─ Master: Stop console collection, store boot log in SQLite
+   ├─ Master: Verify kernel version (detect panics)
+   ├─ Master: Download /boot/config-<version>
+   ├─ Master: SSH call: collect_metadata("iteration")
+   ├─ Master: SSH call: run_test(test_type)
+   ├─ Master: Record result in SQLite
+   ├─ Master: Mark commit good/bad in git bisect
+   └─ Continue until bisection complete
+   ↓
+8. Master: Generate report with first bad commit
+```
+
+### File Structure
+
+```
+kernel-bisect/
+├── kbisect                       # Main CLI tool
+├── config/
+│   └── bisect.conf.example       # Configuration template
+├── lib/
+│   └── bisect-functions.sh       # Bash library (deployed to slave)
+├── master/
+│   ├── bisect_master.py          # Main orchestration
+│   ├── state_manager.py          # SQLite state management
+│   ├── slave_deployer.py         # Automatic deployment
+│   ├── slave_monitor.py          # Boot detection
+│   ├── ipmi_controller.py        # IPMI power control
+│   └── console_collector.py      # Console log collection (conserver/IPMI SOL)
+└── README.md
+
+Deployed to slave:
+/root/kernel-bisect/lib/bisect-functions.sh
+/var/lib/kernel-bisect/protected-kernels.list  # Protected kernel list (on slave)
+/var/lib/kernel-bisect/safe-kernel.info         # Safe kernel info (on slave)
+
+Created in bisection directory (master):
+your-bisection-dir/
+├── bisect.yaml                   # Configuration file
+├── bisect.db                     # SQLite database (contains all metadata and logs)
+└── configs/                      # Kernel .config files
+    ├── config-6.5.0-bisect-a1b2c3d
+    └── config-6.5.0-bisect-d4e5f6g
+# Note: Application logs are printed to terminal
+# Build logs and console logs are stored in the database
+```
+
+### Database Schema
+
+**Tables:**
+
+```sql
+-- Bisection sessions
+sessions (
+  session_id, good_commit, bad_commit,
+  start_time, end_time, status, result_commit, config
+)
+
+-- Test iterations
+iterations (
+  iteration_id, session_id, iteration_num, commit_sha, commit_message,
+  build_result, boot_result, test_result, final_result,
+  start_time, end_time, duration, error_message, kernel_version
+)
+
+-- System metadata
+metadata (
+  metadata_id, session_id, iteration_id,
+  collection_time, collection_type, metadata_json, metadata_hash
+)
+
+-- Kernel config files
+metadata_files (
+  file_id, metadata_id, file_type, file_path,
+  file_hash, file_size, compressed
+)
+
+-- Detailed logs
+logs (
+  log_id, iteration_id, log_type, timestamp, message
+)
+
+-- Build and console logs (compressed)
+build_logs (
+  log_id, iteration_id, log_type, timestamp,
+  log_content (BLOB), compressed, size_bytes, exit_code
+)
+```
+
+---
+
+## Examples
+
+### Example 1: Boot Regression
+
+```bash
+# Problem: Kernel won't boot after upgrading from v6.1 to v6.6
+
+kbisect init v6.1 v6.6
+kbisect start
+
+# Wait for completion...
+# Result: First bad commit found: commit abc123def456
+```
+
+### Example 2: Network Performance Regression
+
+```bash
+# Problem: Network throughput dropped from 10Gbps to 5Gbps
+
+# 1. Create test script
+cat > test-network.sh << 'EOF'
+#!/bin/bash
+# Measure network throughput
+THROUGHPUT=$(iperf3 -c 192.168.1.200 -t 10 -J | jq '.end.sum_received.bits_per_second')
+THRESHOLD=8000000000  # 8 Gbps
+
+if [ "$THROUGHPUT" -lt "$THRESHOLD" ]; then
+    echo "Regression: ${THROUGHPUT}bps"
+    exit 1
+else
+    echo "OK: ${THROUGHPUT}bps"
+    exit 0
+fi
+EOF
+chmod +x test-network.sh
+
+# 2. Run bisection with network test
+kbisect init v6.1 v6.6
+kbisect start --test-script ./test-network.sh
+
+# 3. View results
+kbisect report
+```
+
+### Example 3: Using Custom Kernel Config
+
+```bash
+# Problem: Need to test with specific kernel config (DEBUG options enabled)
+
+# 1. Create custom config on master
+scp root@slave:/boot/config-$(uname -r) /tmp/debug.config
+vim /tmp/debug.config
+# Add: CONFIG_DEBUG_INFO=y
+#      CONFIG_DEBUG_KERNEL=y
+
+# 2. Configure bisection to use custom config
+cat > bisect.yaml <<EOF
+kernel_config:
+  config_file: /tmp/debug.config  # Path on master (will be transferred to slave)
+EOF
+
+# 3. Run bisection
+kbisect start
+
+# 4. All kernels built with DEBUG config
+```
+
+---
+
+## FAQ
+
+**Q: How long does bisection take?**
+
+A: Depends on the commit range. Formula: ~log2(commits) iterations.
+- 10 commits: ~4 iterations
+- 100 commits: ~7 iterations
+- 1000 commits: ~10 iterations
+- Each iteration: build time (~30 min) + boot time (~2 min) + test time
 
 # Update library only (don't full redeploy)
 kbisect deploy --update-only

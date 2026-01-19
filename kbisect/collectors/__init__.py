@@ -6,9 +6,10 @@ from kbisect.collectors.base import ConsoleCollector
 from kbisect.collectors.conserver import ConserverCollector
 from kbisect.collectors.ipmi_sol import IPMISOLCollector
 
+
 __all__ = [
-    "ConsoleCollector",
     "ConserverCollector",
+    "ConsoleCollector",
     "IPMISOLCollector",
 ]
 
@@ -37,6 +38,7 @@ def create_console_collector(
     try:
         # Test if conserver is available
         import subprocess
+
         result = subprocess.run(
             ["which", "console"],
             capture_output=True,
@@ -48,7 +50,7 @@ def create_console_collector(
         pass
 
     # Fall back to IPMI SOL
-    if not all([ipmi_host, ipmi_user, ipmi_password]):
+    if not (ipmi_host and ipmi_user is not None and ipmi_password is not None):
         raise RuntimeError(
             "Conserver not available and IPMI credentials not provided. "
             "Cannot create console collector."

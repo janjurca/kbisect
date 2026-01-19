@@ -1,21 +1,20 @@
 """Database models and state management for bisection sessions."""
 
 from kbisect.persistence.models import (
-    Session,
+    BuildLog,
     Iteration,
     Log,
-    BuildLog,
     Metadata,
+    Session,
 )
 from kbisect.persistence.state_manager import StateManager
 
+
 __all__ = [
-    # Models
-    "Session",
+    "BuildLog",
     "Iteration",
     "Log",
-    "BuildLog",
     "Metadata",
-    # State Manager
+    "Session",
     "StateManager",
 ]

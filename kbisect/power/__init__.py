@@ -2,9 +2,15 @@
 
 from kbisect.power.base import (
     BootDevice,
-    PowerController,
     PowerControlError,
+    PowerController,
     PowerState,
+)
+from kbisect.power.beaker import (
+    BeakerCommandError,
+    BeakerController,
+    BeakerError,
+    BeakerTimeoutError,
 )
 from kbisect.power.ipmi import (
     IPMICommandError,
@@ -13,15 +19,18 @@ from kbisect.power.ipmi import (
     IPMITimeoutError,
 )
 
+
 __all__ = [
-    # Base classes and enums
-    "PowerController",
-    "PowerState",
+    "BeakerCommandError",
+    "BeakerController",
+    "BeakerError",
+    "BeakerTimeoutError",
     "BootDevice",
-    "PowerControlError",
-    # IPMI implementation
+    "IPMICommandError",
     "IPMIController",
     "IPMIError",
     "IPMITimeoutError",
-    "IPMICommandError",
+    "PowerControlError",
+    "PowerController",
+    "PowerState",
 ]
