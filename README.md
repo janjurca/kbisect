@@ -2,6 +2,127 @@
 
 Automatically find the exact kernel commit that introduced a bug. The tool handles building, rebooting, testing, and failure recovery without manual intervention.
 
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Prerequisites](#prerequisites)
+- [Configuration](#configuration)
+  - [Quick Start: Minimum Single-Host Configuration](#quick-start-minimum-single-host-configuration)
+  - [Multi-Host Configuration](#multi-host-configuration)
+  - [Power Control Options](#power-control-options)
+  - [Key Optional Settings](#key-optional-settings)
+- [Usage](#usage)
+  - [Basic Bisection](#basic-bisection-boot-test)
+  - [Using a Custom Kernel Config](#using-a-custom-kernel-config)
+  - [Running Custom Tests](#running-custom-tests)
+  - [Advanced: Multi-Host Bisection](#advanced-multi-host-bisection)
+  - [Build-Only Mode](#build-only-mode)
+  - [Resume After Interruption](#resume-after-interruption)
+- [How It Works](#how-it-works)
+- [Common Issues](#common-issues)
+- [Additional Commands](#additional-commands)
+- [FAQ](#faq)
+
+## Installation
+
+### Using pipx (Recommended)
+
+[pipx](https://pipx.pypa.io/) installs kbisect in an isolated environment, preventing dependency conflicts:
+
+```bash
+# Install pipx if you don't have it
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+
+# Install kbisect
+pipx install git+https://github.com/janjurca/kbisect.git
+
+# Verify installation
+kbisect --help
+```
+
+### Using pip (Alternative)
+
+```bash
+# Install system dependencies
+sudo dnf install python3 python3-pip ipmitool git  # RHEL/Fedora
+# OR
+sudo apt install python3 python3-pip ipmitool git  # Debian/Ubuntu
+
+# Optional: Install Beaker client (if using Beaker lab automation)
+sudo dnf install beaker-client  # RHEL/Fedora
+
+# Install kbisect
+pip install git+https://github.com/janjurca/kbisect.git
+
+# Verify installation
+kbisect --help
+```
+
+### Setup SSH Keys
+
+```bash
+# Generate SSH key (if you don't have one)
+ssh-keygen -t ed25519
+
+# Copy to test host(s) - enables passwordless SSH
+ssh-copy-id root@<test-host-ip>
+
+# For multiple hosts, repeat for each
+ssh-copy-id root@<test-host-2-ip>
+
+# Test connection
+ssh root@<test-host-ip> 'echo "SSH works"'
+```
+
+## Quick Start
+
+Get started with a basic bisection in 5 steps:
+
+```bash
+# 1. Create a directory for your bisection
+mkdir ~/my-bisection
+cd ~/my-bisection
+
+# 2. Generate configuration file
+kbisect init-config
+
+# 3. Edit bisect.yaml with your test host details
+vim bisect.yaml
+```
+
+**Minimal configuration** (edit the generated `bisect.yaml`):
+
+```yaml
+hosts:
+  - hostname: 192.168.1.100      # YOUR TEST HOST IP
+    ssh_user: root
+    kernel_path: /root/kernel
+
+    # Optional but recommended: IPMI power control
+    power_control_type: ipmi
+    ipmi_host: 192.168.1.101     # YOUR IPMI IP
+    ipmi_user: admin
+    ipmi_password: changeme
+```
+
+```bash
+# 4. Initialize bisection range
+kbisect init v6.1 v6.6
+
+# 5. Start automatic bisection
+kbisect start
+
+# Monitor progress (from another terminal)
+kbisect status
+
+# When complete, view results
+kbisect report
+```
+
+The report will show the exact commit that introduced the problem.
+
 ## Prerequisites
 
 **Control Machine** (where you run kbisect):
@@ -21,58 +142,7 @@ Automatically find the exact kernel commit that introduced a bug. The tool handl
   - SSH access (minimum requirement)
 - **Multi-host support**: Configure multiple test hosts for parallel bisection (e.g., network testing with server/client roles)
 
-## Installation
-
-### 1. Install on Control Machine
-
-```bash
-# Install system dependencies
-sudo dnf install python3 python3-pip ipmitool git  # RHEL/Fedora
-# OR
-sudo apt install python3 python3-pip ipmitool git  # Debian/Ubuntu
-
-# Optional: Install Beaker client (if using Beaker lab automation)
-sudo dnf install beaker-client  # RHEL/Fedora
-
-# Install kbisect
-pip install git+https://github.com/janjurca/kbisect.git
-
-# Verify installation
-kbisect --help
-```
-
-### 2. Setup SSH Keys
-
-```bash
-# Generate SSH key (if you don't have one)
-ssh-keygen -t ed25519
-
-# Copy to test host(s) - enables passwordless SSH
-ssh-copy-id root@<test-host-ip>
-
-# For multiple hosts, repeat for each
-ssh-copy-id root@<test-host-2-ip>
-
-# Test connection
-ssh root@<test-host-ip> 'echo "SSH works"'
-```
-
-
 ## Configuration
-
-Each bisection case gets its own directory with its own config file.
-
-```bash
-# Create directory for your bisection
-mkdir ~/my-bisection
-cd ~/my-bisection
-
-# Generate config file
-kbisect init-config
-
-# Edit the config
-vim bisect.yaml
-```
 
 ### Quick Start: Minimum Single-Host Configuration
 
@@ -207,6 +277,8 @@ console_logs:
   enabled: true
   collector: "auto"  # Try conserver, fall back to IPMI SOL
 ```
+
+**Note:** Console log collection is currently only supported for single-host configurations. Multi-host console support is not yet implemented.
 
 **Note:** If `kernel_repo` is not configured, you must manually clone the kernel source to `/root/kernel` on each test host before running init.
 
