@@ -159,3 +159,6 @@ src/kbisect/_version.py
 
 # Kernel files
 kernel-bisect/
+
+
+_version.py
