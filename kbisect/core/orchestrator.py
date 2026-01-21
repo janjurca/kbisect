@@ -2234,6 +2234,15 @@ class BisectMaster:
             logger.info("=" * 60)
             logger.info(stdout)
 
+            # Extract and save the first bad commit SHA to database
+            first_bad = self._extract_first_bad_commit()
+            if first_bad:
+                # Get current session to check if result_commit is already set
+                session = self.state.get_session(self.session_id)
+                if session and not session.result_commit:
+                    logger.debug(f"Saving first bad commit to database: {first_bad}")
+                    self.state.update_session(self.session_id, result_commit=first_bad)
+
         logger.info("=" * 60 + "\n")
 
     def build_only(self, commit_sha: str, save_logs: bool = False) -> bool:

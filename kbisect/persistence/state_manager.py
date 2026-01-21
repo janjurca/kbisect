@@ -1635,9 +1635,6 @@ class StateManager:
             report.append(f"Bad commit:  {summary['bad_commit']}")
             report.append(f"Status: {summary['status']}")
 
-            if summary["result_commit"]:
-                report.append(f"\nFirst bad commit: {summary['result_commit']}")
-
             report.append(f"\nTotal iterations: {summary['total_iterations']}")
             report.append(f"Total time: {summary['total_duration_seconds']}s")
 
@@ -1659,6 +1656,27 @@ class StateManager:
 
                 if it["error_message"]:
                     report.append(f"     Error: {it['error_message']}")
+
+            # Show first bad commit prominently at the end if found
+            if summary["result_commit"]:
+                report.append("\n" + "=" * 70)
+                report.append("FIRST BAD COMMIT:")
+                report.append("=" * 70)
+
+                # Find the iteration matching the first bad commit
+                first_bad_iteration = None
+                for it in summary["iterations"]:
+                    if it["commit_sha"].startswith(summary["result_commit"][:7]):
+                        first_bad_iteration = it
+                        break
+
+                if first_bad_iteration:
+                    report.append(
+                        f"# first bad commit: [{first_bad_iteration['commit_sha']}] "
+                        f"{first_bad_iteration['commit_message']}"
+                    )
+                else:
+                    report.append(f"# first bad commit: {summary['result_commit']}")
 
             report.append("\n" + "=" * 70)
 
