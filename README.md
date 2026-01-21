@@ -739,7 +739,7 @@ kbisect ipmi reset                   # Hard reset
 kbisect ipmi cycle                   # Power cycle (off → wait → on)
 
 # Note: For multi-host setups with multiple IPMI hosts,
-# the first configured host is used
+# the first configured host is used (proper multihost support is WIP)
 ```
 
 **Configuration Validation:**
