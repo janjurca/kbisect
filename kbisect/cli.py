@@ -201,9 +201,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         deploy_path = host_dict.get("bisect_path", "/root/kernel-bisect/lib")
 
         print(f"\n[{i}/{len(config_dict['hosts'])}] Checking host: {host_name}")
-        deployer = SlaveDeployer(
-            host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout
-        )
+        deployer = SlaveDeployer(host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout)
 
         if not deployer.is_deployed():
             if auto_deploy or args.force_deploy:
@@ -316,10 +314,7 @@ def _resume_session(session, state: StateManager, config_dict: dict) -> bool:
             print(f"Marking pending commit {last_iteration.commit_sha[:7]}...")
 
             # Determine what to mark based on error message
-            if (
-                "Boot timeout" in last_iteration.error_message
-                or "Kernel panic" in last_iteration.error_message
-            ):
+            if "Boot timeout" in last_iteration.error_message or "Kernel panic" in last_iteration.error_message:
                 # Determine mark type based on original test type
                 test_type = config_dict.get("test", {}).get("type", "boot")
                 if test_type == "boot":
@@ -327,9 +322,7 @@ def _resume_session(session, state: StateManager, config_dict: dict) -> bool:
                     print("  Boot test mode: marking as BAD")
                 else:
                     mark_as = "skip"
-                    print(
-                        "  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)"
-                    )
+                    print("  Custom test mode: marking as SKIP (cannot test if kernel doesn't boot)")
 
                 # Mark the commit via SSH (use first host since all share git state)
                 _first_host_name, first_ssh, first_host_dict = ssh_clients[0]
@@ -343,9 +336,7 @@ def _resume_session(session, state: StateManager, config_dict: dict) -> bool:
                     state.update_iteration(
                         last_iteration.iteration_id,
                         final_result=mark_as,
-                        error_message=last_iteration.error_message.replace(
-                            " (git mark pending - slave down)", ""
-                        ),
+                        error_message=last_iteration.error_message.replace(" (git mark pending - slave down)", ""),
                     )
                 else:
                     print(f"✗ Failed to mark commit: {stderr}")
@@ -453,10 +444,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         for it in iterations[-5:]:  # Show last 5
             result = it.final_result or "running"
             duration = f"{it.duration}s" if it.duration else "N/A"
-            print(
-                f"  {it.iteration_num:3d}. {it.commit_sha[:7]} | "
-                f"{result:7s} | {duration:6s} | {it.commit_message[:50]}"
-            )
+            print(f"  {it.iteration_num:3d}. {it.commit_sha[:7]} | {result:7s} | {duration:6s} | {it.commit_message[:50]}")
 
     state.close()
     return 0
@@ -516,9 +504,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     monitors = []
     ssh_connect_timeout = config_dict.get("timeouts", {}).get("ssh_connect", 15)
     for host_dict in config_dict["hosts"]:
-        monitor = SlaveMonitor(
-            host_dict["hostname"], host_dict.get("ssh_user", "root"), ssh_connect_timeout
-        )
+        monitor = SlaveMonitor(host_dict["hostname"], host_dict.get("ssh_user", "root"), ssh_connect_timeout)
         monitors.append((host_dict["hostname"], monitor))
 
     print(f"=== Host Monitor ({len(monitors)} hosts) ===\n")
@@ -529,10 +515,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
             while True:
                 for hostname, monitor in monitors:
                     status = monitor.check_health()
-                    print(
-                        f"[{status.last_check}] {hostname}: Alive={status.is_alive} | "
-                        f"Kernel={status.kernel_version or 'N/A'}"
-                    )
+                    print(f"[{status.last_check}] {hostname}: Alive={status.is_alive} | Kernel={status.kernel_version or 'N/A'}")
                 print()  # Blank line between intervals
                 time.sleep(args.interval)
         except KeyboardInterrupt:
@@ -592,9 +575,7 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
 
     print(f"=== IPMI Control for {host_name} ===\n")
 
-    controller = IPMIController(
-        host_dict["ipmi_host"], host_dict["ipmi_user"], host_dict["ipmi_password"]
-    )
+    controller = IPMIController(host_dict["ipmi_host"], host_dict["ipmi_user"], host_dict["ipmi_password"])
 
     if args.ipmi_command == "status":
         state = controller.get_power_status()
@@ -635,20 +616,14 @@ def _handle_logs_list(state: StateManager, args: argparse.Namespace) -> int:
         return 0
 
     print("=== Build Logs ===\n")
-    print(
-        f"{'Log ID':<8} {'Iter':<6} {'Host':<15} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}"
-    )
+    print(f"{'Log ID':<8} {'Iter':<6} {'Host':<15} {'Commit':<9} {'Type':<8} {'Status':<10} {'Size':<10} {'Timestamp':<20}")
     print("-" * 100)
 
     for log in logs:
         size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
         timestamp = log["timestamp"][:19] if log["timestamp"] else "N/A"
         hostname = log["hostname"] if log["hostname"] else "-"
-        print(
-            f"{log['log_id']:<8} {log['iteration_num']:<6} "
-            f"{hostname:<15} {log['commit_sha'][:7]:<9} {log['log_type']:<8} "
-            f"{log['status']:<10} {size_kb:>7.1f} KB {timestamp:<20}"
-        )
+        print(f"{log['log_id']:<8} {log['iteration_num']:<6} {hostname:<15} {log['commit_sha'][:7]:<9} {log['log_type']:<8} {log['status']:<10} {size_kb:>7.1f} KB {timestamp:<20}")
     return 0
 
 
@@ -705,11 +680,7 @@ def _handle_logs_iteration(state: StateManager, args: argparse.Namespace) -> int
 
     for log in logs:
         size_kb = log["size_bytes"] / 1024 if log["size_bytes"] else 0
-        exit_status = (
-            "RUNNING"
-            if log["exit_code"] is None
-            else ("SUCCESS" if log["exit_code"] == 0 else "FAILED")
-        )
+        exit_status = "RUNNING" if log["exit_code"] is None else ("SUCCESS" if log["exit_code"] == 0 else "FAILED")
         print(f"  Log ID {log['log_id']}: {log['log_type']} - {exit_status} ({size_kb:.1f} KB)")
 
     print("\nView log: kbisect logs show <log-id>")
@@ -868,19 +839,14 @@ def cmd_metadata(args: argparse.Namespace) -> int:
             return 0
 
         print("=== Metadata ===\n")
-        print(
-            f"{'ID':<6} {'Session':<8} {'Iteration':<10} {'Host':<15} {'Type':<12} {'Collection Time':<20}"
-        )
+        print(f"{'ID':<6} {'Session':<8} {'Iteration':<10} {'Host':<15} {'Type':<12} {'Collection Time':<20}")
         print("-" * 85)
 
         for meta in metadata_list:
             iter_str = str(meta["iteration_id"]) if meta["iteration_id"] else "N/A"
             timestamp = meta["collection_time"][:19] if meta["collection_time"] else "N/A"
             hostname = meta["hostname"] if meta["hostname"] else "N/A"
-            print(
-                f"{meta['metadata_id']:<6} {meta['session_id']:<8} "
-                f"{iter_str:<10} {hostname:<15} {meta['collection_type']:<12} {timestamp:<20}"
-            )
+            print(f"{meta['metadata_id']:<6} {meta['session_id']:<8} {iter_str:<10} {hostname:<15} {meta['collection_type']:<12} {timestamp:<20}")
 
     elif args.metadata_command == "show":
         # Show specific metadata
@@ -943,9 +909,7 @@ def cmd_metadata(args: argparse.Namespace) -> int:
             print(f"Metadata {args.metadata_id} not found")
             return 1
 
-        output_path = (
-            Path(args.output) if args.output else Path(f"metadata-{args.metadata_id}.json")
-        )
+        output_path = Path(args.output) if args.output else Path(f"metadata-{args.metadata_id}.json")
 
         try:
             import json
@@ -996,9 +960,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         print(f"[{i}/{len(config_dict['hosts'])}] Host: {host_name}")
 
-        deployer = SlaveDeployer(
-            host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout
-        )
+        deployer = SlaveDeployer(host_name, host_user, deploy_path, connect_timeout=ssh_connect_timeout)
 
         if args.verify_only:
             # Just verify deployment
@@ -1032,11 +994,53 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         print()
 
+    # Deploy kernel source if configured (only for full deployment, not verify/update)
+    if not args.verify_only and not args.update_only:
+        kernel_repo_config = config_dict.get("kernel_repo", {})
+        if kernel_repo_config.get("source"):
+            print("=== Deploying Kernel Source ===\n")
+            print(f"Source: {kernel_repo_config['source']}")
+            if kernel_repo_config.get("branch"):
+                print(f"Branch: {kernel_repo_config['branch']}")
+            print()
+
+            try:
+                # Create temporary BisectMaster instance for kernel deployment
+                config = create_bisect_config(config_dict, args)
+                bisect = BisectMaster(config, "dummy", "dummy")
+
+                # Prepare kernel repository on control machine
+                print("Preparing kernel repository on control machine...")
+                repo_path = bisect._prepare_kernel_repo()
+
+                if repo_path:
+                    # Transfer kernel repository to all hosts
+                    if bisect._transfer_repo_to_hosts(repo_path):
+                        print("\n✓ Kernel source deployed to all hosts!")
+                    else:
+                        print("\n✗ Failed to transfer kernel source to one or more hosts")
+                        all_success = False
+                else:
+                    print("\n✗ Failed to prepare kernel repository")
+                    all_success = False
+
+            except Exception as exc:
+                logger.error(f"Kernel deployment failed: {exc}")
+                print(f"\n✗ Kernel deployment error: {exc}")
+                all_success = False
+
+        else:
+            print("\n⚠  Warning: kernel_repo.source not configured in bisect.yaml")
+            print("Kernel source was not deployed. You can:")
+            print("  1. Configure kernel_repo.source in bisect.yaml and run 'kbisect deploy' again")
+            print("  2. Manually set up kernel source on hosts at the configured kernel_path")
+            print()
+
     if all_success:
-        print("✓ All hosts deployed successfully!")
+        print("✓ All components deployed successfully!")
         return 0
     else:
-        print("✗ One or more hosts failed deployment")
+        print("✗ One or more components failed deployment")
         return 1
 
 
@@ -1174,9 +1178,7 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
-        "-c", "--config", default=DEFAULT_CONFIG_PATH, help="Configuration file path"
-    )
+    parser.add_argument("-c", "--config", default=DEFAULT_CONFIG_PATH, help="Configuration file path")
 
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
@@ -1194,12 +1196,8 @@ def create_parser() -> argparse.ArgumentParser:
 
     # start command
     parser_start = subparsers.add_parser("start", help="Start bisection")
-    parser_start.add_argument(
-        "good_commit", nargs="?", help="Known good commit (OLDER, working version)"
-    )
-    parser_start.add_argument(
-        "bad_commit", nargs="?", help="Known bad commit (NEWER, broken version)"
-    )
+    parser_start.add_argument("good_commit", nargs="?", help="Known good commit (OLDER, working version)")
+    parser_start.add_argument("bad_commit", nargs="?", help="Known bad commit (NEWER, broken version)")
     parser_start.add_argument("--reinit", action="store_true", help="Reinitialize bisection")
 
     # status command
@@ -1208,9 +1206,7 @@ def create_parser() -> argparse.ArgumentParser:
     # report command
     parser_report = subparsers.add_parser("report", help="Generate bisection report")
     parser_report.add_argument("--session-id", type=int, help="Session ID (default: latest)")
-    parser_report.add_argument(
-        "--format", choices=["text", "json"], default="text", help="Report format"
-    )
+    parser_report.add_argument("--format", choices=["text", "json"], default="text", help="Report format")
     parser_report.add_argument("--output", "-o", help="Output file (default: stdout)")
 
     # monitor command
@@ -1228,23 +1224,13 @@ def create_parser() -> argparse.ArgumentParser:
 
     # deploy command
     parser_deploy = subparsers.add_parser("deploy", help="Deploy slave components")
-    parser_deploy.add_argument(
-        "--verify-only", action="store_true", help="Only verify deployment, do not deploy"
-    )
-    parser_deploy.add_argument(
-        "--update-only", action="store_true", help="Only update library, do not full deploy"
-    )
+    parser_deploy.add_argument("--verify-only", action="store_true", help="Only verify deployment, do not deploy")
+    parser_deploy.add_argument("--update-only", action="store_true", help="Only update library, do not full deploy")
 
     # init-config command
-    parser_init_config = subparsers.add_parser(
-        "init-config", help="Generate example configuration file"
-    )
-    parser_init_config.add_argument(
-        "--output", "-o", help="Output file path (default: bisect.yaml)"
-    )
-    parser_init_config.add_argument(
-        "--force", "-f", action="store_true", help="Overwrite existing file without prompting"
-    )
+    parser_init_config = subparsers.add_parser("init-config", help="Generate example configuration file")
+    parser_init_config.add_argument("--output", "-o", help="Output file path (default: bisect.yaml)")
+    parser_init_config.add_argument("--force", "-f", action="store_true", help="Overwrite existing file without prompting")
 
     # check command
     subparsers.add_parser("check", help="Check system dependencies and configuration")
@@ -1256,18 +1242,14 @@ def create_parser() -> argparse.ArgumentParser:
     # logs list
     parser_logs_list = logs_subparsers.add_parser("list", help="List all build logs")
     parser_logs_list.add_argument("--session-id", type=int, help="Filter by session ID")
-    parser_logs_list.add_argument(
-        "--log-type", choices=["build", "boot", "test"], help="Filter by log type"
-    )
+    parser_logs_list.add_argument("--log-type", choices=["build", "boot", "test"], help="Filter by log type")
 
     # logs show
     parser_logs_show = logs_subparsers.add_parser("show", help="Show specific build log")
     parser_logs_show.add_argument("log_id", type=int, help="Log ID to display")
 
     # logs iteration
-    parser_logs_iteration = logs_subparsers.add_parser(
-        "iteration", help="Show logs for specific iteration"
-    )
+    parser_logs_iteration = logs_subparsers.add_parser("iteration", help="Show logs for specific iteration")
     parser_logs_iteration.add_argument("iteration_num", type=int, help="Iteration number")
 
     # logs export
@@ -1278,57 +1260,35 @@ def create_parser() -> argparse.ArgumentParser:
     # logs tail
     parser_logs_tail = logs_subparsers.add_parser("tail", help="Tail (follow) a log in real-time")
     parser_logs_tail.add_argument("log_id", type=int, help="Log ID to tail")
-    parser_logs_tail.add_argument(
-        "--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)"
-    )
+    parser_logs_tail.add_argument("--interval", type=float, default=1.0, help="Polling interval in seconds (default: 1.0)")
 
     # metadata command
     parser_metadata = subparsers.add_parser("metadata", help="Manage metadata")
-    metadata_subparsers = parser_metadata.add_subparsers(
-        dest="metadata_command", help="Metadata commands"
-    )
+    metadata_subparsers = parser_metadata.add_subparsers(dest="metadata_command", help="Metadata commands")
 
     # metadata list
     parser_metadata_list = metadata_subparsers.add_parser("list", help="List all metadata")
     parser_metadata_list.add_argument("--session-id", type=int, help="Filter by session ID")
-    parser_metadata_list.add_argument(
-        "--type", choices=["baseline", "iteration"], help="Filter by collection type"
-    )
+    parser_metadata_list.add_argument("--type", choices=["baseline", "iteration"], help="Filter by collection type")
 
     # metadata show
-    parser_metadata_show = metadata_subparsers.add_parser(
-        "show", help="Show specific metadata details"
-    )
+    parser_metadata_show = metadata_subparsers.add_parser("show", help="Show specific metadata details")
     parser_metadata_show.add_argument("metadata_id", type=int, help="Metadata ID to display")
 
     # metadata export-file
-    parser_metadata_export_file = metadata_subparsers.add_parser(
-        "export-file", help="Export metadata file (e.g., kernel config) to disk"
-    )
+    parser_metadata_export_file = metadata_subparsers.add_parser("export-file", help="Export metadata file (e.g., kernel config) to disk")
     parser_metadata_export_file.add_argument("file_id", type=int, help="File ID to export")
-    parser_metadata_export_file.add_argument(
-        "--output", "-o", help="Output file path (default: metadata-file-<id>)"
-    )
+    parser_metadata_export_file.add_argument("--output", "-o", help="Output file path (default: metadata-file-<id>)")
 
     # metadata export
-    parser_metadata_export = metadata_subparsers.add_parser(
-        "export", help="Export metadata JSON to file"
-    )
+    parser_metadata_export = metadata_subparsers.add_parser("export", help="Export metadata JSON to file")
     parser_metadata_export.add_argument("metadata_id", type=int, help="Metadata ID to export")
-    parser_metadata_export.add_argument(
-        "--output", "-o", help="Output file path (default: metadata-<id>.json)"
-    )
-    parser_metadata_export.add_argument(
-        "--format", choices=["json", "yaml"], default="json", help="Output format"
-    )
+    parser_metadata_export.add_argument("--output", "-o", help="Output file path (default: metadata-<id>.json)")
+    parser_metadata_export.add_argument("--format", choices=["json", "yaml"], default="json", help="Output format")
 
     # build command
-    parser_build = subparsers.add_parser(
-        "build", help="Build kernel for a specific commit (no reboot, no tests)"
-    )
-    parser_build.add_argument(
-        "commit", help="Commit hash to build (full 40-char SHA or short form)"
-    )
+    parser_build = subparsers.add_parser("build", help="Build kernel for a specific commit (no reboot, no tests)")
+    parser_build.add_argument("commit", help="Commit hash to build (full 40-char SHA or short form)")
     parser_build.add_argument(
         "--save-logs",
         action="store_true",

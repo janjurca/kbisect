@@ -752,6 +752,23 @@ kbisect check                        # Validates:
                                      # - Build dependencies
 ```
 
+**Deploy Components:**
+```bash
+# Deploy bisection library and kernel source to all hosts
+kbisect deploy                       # Full deployment:
+                                     # - Bisection helper scripts/library
+                                     # - Kernel source (if kernel_repo.source configured)
+                                     # - Initializes kernel protection
+
+# Verify deployment status
+kbisect deploy --verify-only         # Check if hosts are deployed
+
+# Update library only (without kernel)
+kbisect deploy --update-only         # Update bisection library scripts
+```
+
+**Note:** The deploy command automatically copies kernel source when `kernel_repo.source` is configured in `bisect.yaml`. If not configured, you'll see a warning and will need to manually set up kernel source on hosts.
+
 **Monitoring:**
 ```bash
 # Monitor host health
