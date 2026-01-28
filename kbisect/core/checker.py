@@ -346,43 +346,10 @@ class SystemChecker:
             return results
 
         try:
-            # Create power controller instance based on type
-            controller = None
-            if power_type == "ipmi":
-                if (
-                    host_config.ipmi_host
-                    and host_config.ipmi_user is not None
-                    and host_config.ipmi_password is not None
-                ):
-                    from ..power import IPMIController
+            # Create power controller instance using factory
+            from ..power.factory import create_power_controller
 
-                    controller = IPMIController(
-                        host_config.ipmi_host, host_config.ipmi_user, host_config.ipmi_password
-                    )
-                else:
-                    results.append(
-                        CheckResult(
-                            category=f"Host: {hostname}",
-                            name="IPMI power control",
-                            passed=False,
-                            message="IPMI credentials incomplete (need ipmi_host, ipmi_user, ipmi_password)",
-                        )
-                    )
-                    return results
-            elif power_type == "beaker":
-                from ..power import BeakerController
-
-                controller = BeakerController(host_config.hostname)
-            else:
-                results.append(
-                    CheckResult(
-                        category=f"Host: {hostname}",
-                        name="power control",
-                        passed=False,
-                        message=f"Unknown power control type: {power_type}",
-                    )
-                )
-                return results
+            controller = create_power_controller(host_config)
 
             # Run health check
             health_result = controller.health_check()

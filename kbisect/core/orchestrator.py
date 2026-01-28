@@ -130,22 +130,11 @@ class HostManager:
         self.ssh = SSHClient(host_config.hostname, host_config.ssh_user, ssh_connect_timeout)
 
         # Create power controller based on configured type
-        self.power_controller: Optional["PowerController"] = None  # noqa: UP037
-        if host_config.power_control_type == "ipmi":
-            if host_config.ipmi_host and host_config.ipmi_user is not None and host_config.ipmi_password is not None:
-                from kbisect.power import IPMIController
+        from kbisect.power.factory import create_power_controller
 
-                self.power_controller = IPMIController(
-                    host_config.ipmi_host,
-                    host_config.ipmi_user,
-                    host_config.ipmi_password,
-                    ssh_host=host_config.hostname,
-                    ssh_connect_timeout=ssh_connect_timeout,
-                )
-        elif host_config.power_control_type == "beaker":
-            from kbisect.power import BeakerController
-
-            self.power_controller = BeakerController(host_config.hostname, ssh_connect_timeout)
+        self.power_controller: Optional["PowerController"] = create_power_controller(  # noqa: UP037
+            host_config, ssh_connect_timeout
+        )
 
         # Console collector (created per boot cycle)
         self.console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037

@@ -19,7 +19,7 @@ from kbisect.core.checker import SystemChecker
 from kbisect.core.orchestrator import BisectConfig, HostConfig
 from kbisect.deployment import SlaveDeployer
 from kbisect.persistence import StateManager
-from kbisect.power import IPMIController
+from kbisect.power.factory import create_power_controller
 
 
 # Constants
@@ -538,14 +538,65 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_ipmi(args: argparse.Namespace) -> int:
-    """IPMI control commands.
+def execute_power_command(controller: "PowerController", command: str) -> bool:
+    """Execute power command and print result.
+
+    Args:
+        controller: Power controller instance
+        command: Command to execute (status, on, off, reset, cycle)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        if command == "status":
+            state = controller.get_power_status()
+            print(f"  Status: {state.value}")
+            return True
+        elif command == "on":
+            if controller.power_on():
+                print("  ✓ Power on command sent")
+                return True
+            else:
+                print("  ✗ Power on failed")
+                return False
+        elif command == "off":
+            if controller.power_off():
+                print("  ✓ Power off command sent")
+                return True
+            else:
+                print("  ✗ Power off failed")
+                return False
+        elif command == "reset":
+            if controller.reset():
+                print("  ✓ Reset command sent")
+                return True
+            else:
+                print("  ✗ Reset failed")
+                return False
+        elif command == "cycle":
+            if controller.power_cycle():
+                print("  ✓ Power cycle command sent")
+                return True
+            else:
+                print("  ✗ Power cycle failed")
+                return False
+        else:
+            print(f"  ✗ Unknown command: {command}")
+            return False
+    except Exception as e:
+        print(f"  ✗ Exception: {e}")
+        return False
+
+
+def cmd_power(args: argparse.Namespace) -> int:
+    """Power control commands for all configured hosts.
 
     Args:
         args: Parsed command-line arguments
 
     Returns:
-        Exit code (0 for success, 1 for failure)
+        Exit code (0 if all succeeded, 1 if any failed)
     """
     config_dict = load_config(args.config)
 
@@ -553,55 +604,92 @@ def cmd_ipmi(args: argparse.Namespace) -> int:
         print("✗ Config file must have 'hosts' section")
         return 1
 
-    # Collect all hosts with IPMI configured
-    ipmi_hosts = []
-    for i, host_dict in enumerate(config_dict["hosts"]):
-        if host_dict.get("ipmi_host") and "ipmi_user" in host_dict and "ipmi_password" in host_dict:
-            ipmi_hosts.append((i, host_dict))
+    # Get SSH timeout from config
+    ssh_timeout = config_dict.get("timeouts", {}).get("ssh_connect", 15)
 
-    if not ipmi_hosts:
-        print("✗ No hosts have IPMI configured")
-        print("Configure IPMI for at least one host in config file")
+    # Collect power-enabled hosts and hosts without power control
+    power_hosts = []
+    no_power_hosts = []
+
+    for host_dict in config_dict["hosts"]:
+        power_type = host_dict.get("power_control_type", "ipmi")
+        if power_type is None:
+            no_power_hosts.append(host_dict["hostname"])
+        else:
+            power_hosts.append(host_dict)
+
+    # Print note about skipped hosts
+    if no_power_hosts:
+        print(f"Note: Skipping {len(no_power_hosts)} host(s) with no power control:")
+        for hostname in no_power_hosts:
+            print(f"  - {hostname}")
+        print()
+
+    # Error if no power-enabled hosts found
+    if not power_hosts:
+        print("✗ No hosts have power control configured")
+        print("Configure power_control_type for at least one host")
         return 1
 
-    # If multiple hosts have IPMI, show selection (for now, use first host)
-    # TODO: Add --host-index argument to allow selection
-    if len(ipmi_hosts) > 1:
-        print(f"Note: {len(ipmi_hosts)} hosts have IPMI configured, using first host")
-        print("  (Future: Use --host-index to select specific host)\n")
+    # Execute command on each host
+    print(f"=== Power Control: {args.power_command} ===\n")
 
-    _host_index, host_dict = ipmi_hosts[0]
-    host_name = host_dict["hostname"]
+    results = []
 
-    print(f"=== IPMI Control for {host_name} ===\n")
+    for i, host_dict in enumerate(power_hosts, 1):
+        hostname = host_dict["hostname"]
+        power_type = host_dict.get("power_control_type", "ipmi")
 
-    controller = IPMIController(host_dict["ipmi_host"], host_dict["ipmi_user"], host_dict["ipmi_password"])
+        print(f"[{i}/{len(power_hosts)}] Host: {hostname}")
+        print(f"  Power control: {power_type}")
 
-    if args.ipmi_command == "status":
-        state = controller.get_power_status()
-        print(f"Power state: {state.value}")
+        try:
+            # Create HostConfig instance
+            host_config = HostConfig(
+                hostname=hostname,
+                ssh_user=host_dict.get("ssh_user", "root"),
+                kernel_path=host_dict.get("kernel_path", "/root/kernel"),
+                bisect_path=host_dict.get("bisect_path", "/root/kernel-bisect/lib"),
+                test_script=host_dict.get("test_script", "test.sh"),
+                kernel_config_file=host_dict.get("kernel_config_file"),
+                power_control_type=power_type,
+                ipmi_host=host_dict.get("ipmi_host"),
+                ipmi_user=host_dict.get("ipmi_user"),
+                ipmi_password=host_dict.get("ipmi_password"),
+            )
 
-    elif args.ipmi_command == "on":
-        print("Powering on...")
-        controller.power_on()
-        print("✓ Power on command sent")
+            # Create controller using factory
+            controller = create_power_controller(host_config, ssh_timeout)
 
-    elif args.ipmi_command == "off":
-        print("Powering off...")
-        controller.power_off()
-        print("✓ Power off command sent")
+            if controller is None:
+                print("  ✗ No power control configured")
+                results.append(False)
+                print()
+                continue
 
-    elif args.ipmi_command == "reset":
-        print("Resetting...")
-        controller.reset()
-        print("✓ Reset command sent")
+            # Execute command
+            success = execute_power_command(controller, args.power_command)
+            results.append(success)
 
-    elif args.ipmi_command == "cycle":
-        print("Power cycling...")
-        controller.power_cycle()
-        print("✓ Power cycle command sent")
+        except ValueError as e:
+            print(f"  ✗ Configuration error: {e}")
+            results.append(False)
+        except Exception as e:
+            print(f"  ✗ Error: {e}")
+            results.append(False)
 
-    return 0
+        print()
+
+    # Print summary
+    success_count = sum(results)
+    total_count = len(results)
+
+    if success_count == total_count:
+        print(f"✓ All {total_count} host(s) succeeded")
+        return 0
+    else:
+        print(f"✗ {success_count}/{total_count} host(s) succeeded")
+        return 1
 
 
 def _handle_logs_list(state: StateManager, args: argparse.Namespace) -> int:
@@ -1214,12 +1302,12 @@ def create_parser() -> argparse.ArgumentParser:
     parser_monitor.add_argument("--continuous", action="store_true", help="Continuous monitoring")
     parser_monitor.add_argument("--interval", type=int, default=5, help="Check interval in seconds")
 
-    # ipmi command
-    parser_ipmi = subparsers.add_parser("ipmi", help="IPMI control")
-    parser_ipmi.add_argument(
-        "ipmi_command",
+    # power command
+    parser_power = subparsers.add_parser("power", help="Power control for all hosts")
+    parser_power.add_argument(
+        "power_command",
         choices=["status", "on", "off", "reset", "cycle"],
-        help="IPMI command",
+        help="Power control command",
     )
 
     # deploy command
@@ -1321,8 +1409,8 @@ def main() -> int:
             return cmd_report(args)
         if args.command == "monitor":
             return cmd_monitor(args)
-        if args.command == "ipmi":
-            return cmd_ipmi(args)
+        if args.command == "power":
+            return cmd_power(args)
         if args.command == "deploy":
             return cmd_deploy(args)
         if args.command == "init-config":

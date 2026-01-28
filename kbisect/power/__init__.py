@@ -12,6 +12,7 @@ from kbisect.power.beaker import (
     BeakerError,
     BeakerTimeoutError,
 )
+from kbisect.power.factory import create_power_controller
 from kbisect.power.ipmi import (
     IPMICommandError,
     IPMIController,
@@ -33,4 +34,5 @@ __all__ = [
     "PowerControlError",
     "PowerController",
     "PowerState",
+    "create_power_controller",
 ]
