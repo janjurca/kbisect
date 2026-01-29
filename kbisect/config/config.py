@@ -23,6 +23,9 @@ class HostConfig:
         ipmi_host: Optional IPMI interface hostname or IP
         ipmi_user: Optional IPMI username
         ipmi_password: Optional IPMI password
+        console_enabled: Enable console log collection for this host
+        console_collector_type: Console collector type ("conserver", "ipmi", "auto")
+        console_hostname: Console hostname for this host (defaults to hostname if not specified)
     """
 
     hostname: str
@@ -35,6 +38,11 @@ class HostConfig:
     ipmi_host: Optional[str] = None
     ipmi_user: Optional[str] = None
     ipmi_password: Optional[str] = None
+
+    # Console log collection (per-host)
+    console_enabled: bool = False                # Enable/disable console collection for this host
+    console_collector_type: str = "auto"         # "conserver", "ipmi", or "auto"
+    console_hostname: Optional[str] = None       # Console endpoint (defaults to hostname if None)
 
 
 @dataclass
@@ -54,10 +62,6 @@ class BisectConfig:
         collect_baseline: Collect baseline system metadata
         collect_per_iteration: Collect metadata per iteration
         collect_kernel_config: Collect kernel .config files
-        collect_console_logs: Collect console logs during boot
-        console_collector_type: Console collector type (conserver, ipmi, auto)
-        console_hostname: Override hostname for console connection
-        console_fallback_ipmi: Fall back to IPMI SOL if conserver fails
         kernel_repo_source: Git URL or local path to kernel repository (optional)
         kernel_repo_branch: Branch or ref to checkout (optional)
     """
@@ -85,12 +89,6 @@ class BisectConfig:
     collect_baseline: bool = True
     collect_per_iteration: bool = True
     collect_kernel_config: bool = True
-
-    # Console log collection
-    collect_console_logs: bool = False
-    console_collector_type: str = "auto"
-    console_hostname: Optional[str] = None
-    console_fallback_ipmi: bool = True
 
     # Kernel repository (optional automatic deployment)
     kernel_repo_source: Optional[str] = None

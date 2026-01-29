@@ -109,11 +109,6 @@ def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfi
     # Get metadata settings from config
     metadata_config = config_dict.get("metadata", {})
 
-    # Get console log settings from config file
-    console_logs_config = config_dict.get("console_logs", {})
-    collect_console_logs = console_logs_config.get("enabled", False)
-    console_collector_type = console_logs_config.get("collector", "auto")
-
     # Parse hosts configuration (REQUIRED)
     if "hosts" not in config_dict:
         logger.error("Config file missing 'hosts' section")
@@ -143,6 +138,10 @@ def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfi
             ipmi_host=host_dict.get("ipmi_host"),
             ipmi_user=host_dict.get("ipmi_user"),
             ipmi_password=host_dict.get("ipmi_password"),
+            # Per-host console configuration
+            console_enabled=host_dict.get("console_enabled", False),
+            console_collector_type=host_dict.get("console_collector", "auto"),
+            console_hostname=host_dict.get("console_hostname"),
         )
         hosts.append(host_config)
 
@@ -161,10 +160,6 @@ def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfi
         collect_baseline=metadata_config.get("collect_baseline", True),
         collect_per_iteration=metadata_config.get("collect_per_iteration", True),
         collect_kernel_config=metadata_config.get("collect_kernel_config", True),
-        collect_console_logs=collect_console_logs,
-        console_collector_type=console_collector_type,
-        console_hostname=console_logs_config.get("hostname"),
-        console_fallback_ipmi=console_logs_config.get("fallback_to_ipmi", True),
         kernel_repo_source=config_dict.get("kernel_repo", {}).get("source"),
         kernel_repo_branch=config_dict.get("kernel_repo", {}).get("branch"),
     )

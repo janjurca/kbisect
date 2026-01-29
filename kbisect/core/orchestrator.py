@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from kbisect.collectors import ConsoleCollector
     from kbisect.power.base import PowerController
 
+from kbisect.collectors import create_console_collector
 from kbisect.config.config import BisectConfig, HostConfig
 from kbisect.remote import SSHClient
 
@@ -136,8 +137,40 @@ class HostManager:
             host_config, ssh_connect_timeout
         )
 
-        # Console collector (created per boot cycle)
+        # Create console collector from per-host config
         self.console_collector: Optional["ConsoleCollector"] = None  # noqa: UP037
+
+        if host_config.console_enabled:
+            # Determine console hostname (use override if specified, else SSH hostname)
+            console_hostname = host_config.console_hostname or host_config.hostname
+
+            try:
+                logger.debug(
+                    f"[{host_config.hostname}] Creating console collector "
+                    f"(type={host_config.console_collector_type}, console_host={console_hostname})"
+                )
+
+                self.console_collector = create_console_collector(
+                    collector_type=host_config.console_collector_type,
+                    hostname=console_hostname,
+                    ipmi_host=host_config.ipmi_host,
+                    ipmi_user=host_config.ipmi_user,
+                    ipmi_password=host_config.ipmi_password,
+                )
+
+                logger.info(
+                    f"[{host_config.hostname}] Console collector created: "
+                    f"{type(self.console_collector).__name__}"
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    f"[{host_config.hostname}] Failed to create console collector: {exc}"
+                )
+                logger.warning(f"[{host_config.hostname}] Console logs will not be collected")
+                self.console_collector = None
+        else:
+            logger.debug(f"[{host_config.hostname}] Console collection disabled")
 
     def __repr__(self) -> str:
         """String representation."""
@@ -1454,7 +1487,105 @@ class BisectMaster:
         logger.error(f"[{host_manager.config.hostname}] ✗ {error_msg}")
         return False, error_msg
 
-    def _reboot_host(self, host_manager: HostManager, _iteration_id: int, expected_kernel_ver: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
+    def _stop_and_store_console_log(
+        self,
+        host_manager: HostManager,
+        iteration_id: int,
+    ) -> None:
+        """Stop console collector and store logs in database.
+
+        This is a helper method called from multiple places in the reboot workflow
+        (timeout, failure, success) to ensure console logs are always captured.
+
+        Args:
+            host_manager: Host manager for this host
+            iteration_id: Current iteration ID
+        """
+        hostname = host_manager.config.hostname
+
+        if not host_manager.console_collector:
+            return
+
+        if not host_manager.console_collector.is_running():
+            logger.debug(f"[{hostname}] Console collector not running, nothing to stop")
+            return
+
+        try:
+            # Stop collector and get buffered output
+            logger.debug(f"[{hostname}] Stopping console collector...")
+            console_output = host_manager.console_collector.stop()
+
+            if console_output:
+                logger.debug(
+                    f"[{hostname}] Console collector stopped, "
+                    f"captured {len(console_output)} bytes"
+                )
+
+                # Store in database
+                self._store_console_log(
+                    iteration_id=iteration_id,
+                    host_id=host_manager.host_id,
+                    console_output=console_output,
+                    hostname=hostname,
+                )
+            else:
+                logger.debug(f"[{hostname}] No console output captured")
+
+        except Exception as exc:
+            logger.warning(
+                f"[{hostname}] Error stopping console collector: {exc} (non-fatal)"
+            )
+
+    def _store_console_log(
+        self,
+        iteration_id: int,
+        host_id: int,
+        console_output: str,
+        hostname: str,
+    ) -> None:
+        """Store console log in database with host association.
+
+        Args:
+            iteration_id: Iteration ID for this log
+            host_id: Host ID for association
+            console_output: Raw console log content
+            hostname: Hostname (for logging)
+        """
+        if not console_output:
+            logger.debug(f"[{hostname}] No console output to store")
+            return
+
+        try:
+            # Create log header with metadata
+            log_header = f"=== Console Log: {hostname} ===\n"
+            log_header += f"Timestamp: {datetime.now(timezone.utc).isoformat()}\n"
+            log_header += f"Length: {len(console_output)} bytes\n"
+            log_header += f"Lines: {console_output.count(chr(10))}\n"
+            log_header += "\n=== CONSOLE OUTPUT ===\n"
+
+            full_content = log_header + console_output
+
+            # Store in database with host_id linkage
+            log_id = self.state.create_build_log(
+                iteration_id=iteration_id,
+                log_type="console",
+                initial_content=full_content,
+                host_id=host_id,  # CRITICAL: Per-host association
+            )
+
+            # Finalize immediately (console logs collected all at once, not streamed)
+            self.state.finalize_build_log(log_id, exit_code=0)
+
+            logger.info(
+                f"[{hostname}] Stored console log "
+                f"(log_id={log_id}, size={len(console_output)} bytes)"
+            )
+
+        except Exception as exc:
+            logger.error(f"[{hostname}] Failed to store console log: {exc}")
+            # Don't re-raise - console log storage failure shouldn't break bisection
+
+    def _reboot_host(self, host_manager: HostManager, iteration_id: int, expected_kernel_ver: Optional[str]) -> Tuple[bool, Optional[str], Optional[str]]:
         """Reboot a specific host and verify kernel.
 
         Args:
@@ -1468,11 +1599,29 @@ class BisectMaster:
         hostname = host_manager.config.hostname
         logger.info(f"  [{hostname}] Rebooting...")
 
+        # Start console collection BEFORE triggering reboot
+        if host_manager.console_collector:
+            try:
+                logger.debug(f"[{hostname}] Starting console log collection...")
+                started = host_manager.console_collector.start()
+                if started:
+                    logger.debug(f"[{hostname}] Console collection started successfully")
+                else:
+                    logger.warning(f"[{hostname}] Console collection failed to start (non-fatal)")
+            except Exception as exc:
+                logger.warning(
+                    f"[{hostname}] Exception starting console collector: {exc} (non-fatal)"
+                )
+
         # Use power controller if available, otherwise fall back to SSH reboot
         if host_manager.power_controller:
             logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
             if not host_manager.power_controller.reset():
                 logger.error(f"  [{hostname}] Power controller reset failed")
+
+                # Stop and store console log on failure
+                self._stop_and_store_console_log(host_manager, iteration_id)
+
                 return False, None, "Power controller reset failed"
         else:
             logger.info(f"  [{hostname}] Using SSH reboot command")
@@ -1489,6 +1638,11 @@ class BisectMaster:
         while not host_manager.ssh.is_alive():
             if time.time() - boot_start > host_manager.boot_timeout:
                 logger.error(f"  [{hostname}] Boot timeout after {host_manager.boot_timeout}s")
+
+                # Stop and store console log on timeout
+                # This may contain kernel panic or boot failure info
+                self._stop_and_store_console_log(host_manager, iteration_id)
+
                 return False, None, f"Boot timeout after {host_manager.boot_timeout}s"
             time.sleep(5)
 
@@ -1507,11 +1661,21 @@ class BisectMaster:
 
                 if not verified:
                     # Boot verification failed - wrong kernel
+                    # Stop and store console log before returning
+                    self._stop_and_store_console_log(host_manager, iteration_id)
+
                     return False, actual_kernel_ver, error_msg
+
+            # SUCCESS PATH - Stop and store console log on successful boot
+            self._stop_and_store_console_log(host_manager, iteration_id)
 
             return True, actual_kernel_ver, None
         else:
             logger.warning(f"  [{hostname}] Could not determine booted kernel version")
+
+            # Stop and store console log even if uname failed
+            self._stop_and_store_console_log(host_manager, iteration_id)
+
             return True, None, None
 
     def _test_on_host(self, host_manager: HostManager, iteration_id: int) -> Tuple[TestResult, str]:

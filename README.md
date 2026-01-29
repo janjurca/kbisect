@@ -217,7 +217,7 @@ hosts:
 **Test IPMI setup:**
 ```bash
 kbisect check                         # Validates IPMI configuration
-kbisect ipmi status                   # Check power status
+kbisect power status                  # Check power status on all hosts
 ```
 
 #### Option 2: Beaker Lab Automation
@@ -647,13 +647,13 @@ kbisect start
 ### Test host won't boot after kernel install
 
 ```bash
-# Force power cycle (IPMI)
-kbisect ipmi cycle
+# Force power cycle using configured power control
+kbisect power cycle
 
-# Or manually via IPMI console
+# Or manually via IPMI console (if using IPMI)
 ipmitool -I lanplus -H <ipmi-ip> -U <user> -P <pass> sol activate
 
-# For Beaker systems
+# For Beaker systems (if using Beaker)
 bkr system-power --action reboot --force <hostname>
 
 # For SSH-only (requires host to be responsive)
@@ -729,17 +729,17 @@ kbisect logs list                    # List all logs
 kbisect logs show <log-id>           # View specific log
 ```
 
-**Power Control (IPMI):**
+**Power Control:**
 ```bash
-# IPMI commands (requires IPMI configured for at least one host)
-kbisect ipmi status                  # Check power status
-kbisect ipmi on                      # Power on
-kbisect ipmi off                     # Power off
-kbisect ipmi reset                   # Hard reset
-kbisect ipmi cycle                   # Power cycle (off → wait → on)
+# Power control commands (works with IPMI, Beaker, or any configured power method)
+kbisect power status                 # Check power status on all hosts
+kbisect power on                     # Power on all hosts
+kbisect power off                    # Power off all hosts
+kbisect power reset                  # Hard reset all hosts
+kbisect power cycle                  # Power cycle all hosts (off → wait → on)
 
-# Note: For multi-host setups with multiple IPMI hosts,
-# the first configured host is used (proper multihost support is WIP)
+# Note: Commands operate on ALL configured hosts by default.
+# Hosts without power control configured are automatically skipped.
 ```
 
 **Configuration Validation:**

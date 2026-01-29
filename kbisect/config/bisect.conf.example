@@ -39,8 +39,13 @@ hosts:
     ipmi_user: admin
     ipmi_password: changeme
 
+    # Console log collection (per-host, optional)
+    console_enabled: true              # Enable console collection for this host
+    console_collector: "conserver"     # "conserver", "ipmi", or "auto"
+    console_hostname: server1-console  # Console endpoint (defaults to hostname if not specified)
+
   # Example: Second host for multi-host testing (remove if only testing one host)
-  # This example shows Beaker power control
+  # This example shows Beaker power control and IPMI console
   - hostname: server2.example.com    # Second host (e.g., client)
     ssh_user: root
     kernel_path: /root/kernel
@@ -51,6 +56,11 @@ hosts:
     power_control_type: beaker        # Use Beaker lab automation for power control
     # Note: Beaker uses the hostname for system identification
     # Ensure you're authenticated (kinit) before running bisection
+
+    # Console via IPMI SOL for this host
+    console_enabled: true
+    console_collector: "ipmi"          # Use IPMI SOL for console
+    # console_hostname not specified - uses hostname by default
 
 # Kernel repository (optional - automatic repository deployment)
 # If configured, the repository will be cloned/copied on master and transferred to all hosts
@@ -109,16 +119,10 @@ metadata:
   collect_kernel_config: true       # Include kernel .config in metadata
   # All metadata stored in database (no filesystem files)
 
-# Console log collection (boot process logs)
-console_logs:
-  enabled: false                    # Enable console log collection during boot
-  collector: "auto"                 # "conserver" | "ipmi" | "auto"
-  # Override hostname for console connection (default: first host's hostname)
-  hostname: null
-  # Fall back to IPMI SOL if conserver fails
-  fallback_to_ipmi: true
-  # Console logs are stored in database (build_logs table, log_type="console")
-  # View with: kbisect logs list --log-type console
+# Console log collection
+# Console logs are configured per-host in the hosts section above
+# When enabled, console logs are captured during boot and stored in the database
+# View with: kbisect logs list --log-type console
 
 # Application Logging
 # Logs are printed to terminal (stdout/stderr)
