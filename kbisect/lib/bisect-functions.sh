@@ -276,6 +276,7 @@ install_build_deps() {
                 bc \
                 ncurses-devel \
                 perl \
+                zstd \
                 dwarves \
                 >&2 2>&1
 
@@ -302,6 +303,7 @@ install_build_deps() {
                 libssl-dev \
                 bc \
                 libncurses-dev \
+                zstd \
                 dwarves \
                 >&2 2>&1
 
@@ -319,7 +321,7 @@ install_build_deps() {
 
     # Verify critical tools are available
     local missing_tools=""
-    for tool in flex bison gcc make; do
+    for tool in flex bison gcc make zstd; do
         if ! command -v $tool &> /dev/null; then
             missing_tools="$missing_tools $tool"
         fi

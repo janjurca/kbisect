@@ -257,7 +257,7 @@ class SystemChecker:
                 )
 
             # Check remote tools
-            remote_tools = ["make", "grubby"]
+            remote_tools = ["make", "grubby", "zstd"]
             for tool in remote_tools:
                 returncode, stdout, _ = ssh.run_command(
                     f"which {tool}", timeout=self.config.ssh_connect_timeout

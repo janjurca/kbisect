@@ -140,6 +140,7 @@ The report will show the exact commit that introduced the problem.
   - IPMI (best for reliability and recovery)
   - Beaker lab system integration
   - SSH access (minimum requirement)
+- Build dependencies: Automatically installed via `kbisect deploy`, including zstd (required for Linux 5.9+ kernel compression)
 - **Multi-host support**: Configure multiple test hosts for parallel bisection (e.g., network testing with server/client roles)
 
 ## Configuration
