@@ -1195,7 +1195,14 @@ class BisectMaster:
                 return (False, False)
 
         # Check if bisection just completed
-        bisection_complete = "first bad commit" in stdout or "first bad commit" in stderr
+        # Git bisect outputs "<sha> is the first bad commit" when it successfully finds the culprit
+        # Don't match other messages like "could be any of" or "cannot determine"
+        bisection_complete = (
+            "is the first bad commit" in stdout
+            or "is the first bad commit" in stderr
+            or "is first bad commit" in stdout
+            or "is first bad commit" in stderr
+        )
 
         logger.info(f"Marked commit {commit_sha[:SHORT_COMMIT_LENGTH]} as {result.value}")
 
