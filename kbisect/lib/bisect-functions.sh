@@ -65,41 +65,89 @@ EOF
     echo "Configuring GRUB for one-time boot support..." >&2
 
     if [ -f /etc/default/grub ]; then
-        # Check if GRUB_DEFAULT is already set to saved
+        # Track if we need to regenerate GRUB config
+        local grub_modified=0
+
+        # Backup original (only if not already backed up)
+        if [ ! -f /etc/default/grub.bisect-backup ]; then
+            cp /etc/default/grub /etc/default/grub.bisect-backup 2>/dev/null
+        fi
+
+        # 1. Configure GRUB_DEFAULT=saved (for one-time boot support)
+        # This is CRITICAL - without it, grub2-reboot/grub-reboot won't work
         if ! grep -q '^GRUB_DEFAULT=saved' /etc/default/grub 2>/dev/null; then
             echo "  Setting GRUB_DEFAULT=saved in /etc/default/grub" >&2
-
-            # Backup original
-            cp /etc/default/grub /etc/default/grub.bisect-backup 2>/dev/null
-
-            # Remove any existing GRUB_DEFAULT line and add saved
             sed -i '/^GRUB_DEFAULT=/d' /etc/default/grub
             echo 'GRUB_DEFAULT=saved' >> /etc/default/grub
+            grub_modified=1
+        fi
 
-            # Configure GRUB timeout for auto-boot (prevents waiting forever at menu)
+        # 2. Configure GRUB_TIMEOUT (always check and fix if needed)
+        # This prevents boot hangs by ensuring auto-boot after timeout
+        local current_timeout=$(grep '^GRUB_TIMEOUT=' /etc/default/grub 2>/dev/null | cut -d= -f2)
+        if [ "$current_timeout" != "5" ]; then
+            echo "  Setting GRUB_TIMEOUT=5 in /etc/default/grub" >&2
             sed -i '/^GRUB_TIMEOUT=/d' /etc/default/grub
             echo 'GRUB_TIMEOUT=5' >> /etc/default/grub
+            grub_modified=1
+        fi
 
-            # Set timeout style to countdown (shows timer, auto-boots)
+        # 3. Configure GRUB_TIMEOUT_STYLE (always check and fix if needed)
+        # This ensures countdown timer is shown and auto-boot works
+        local current_timeout_style=$(grep '^GRUB_TIMEOUT_STYLE=' /etc/default/grub 2>/dev/null | cut -d= -f2)
+        if [ "$current_timeout_style" != "countdown" ]; then
+            echo "  Setting GRUB_TIMEOUT_STYLE=countdown in /etc/default/grub" >&2
             sed -i '/^GRUB_TIMEOUT_STYLE=/d' /etc/default/grub
             echo 'GRUB_TIMEOUT_STYLE=countdown' >> /etc/default/grub
+            grub_modified=1
+        fi
 
-            # Regenerate GRUB config to apply changes
+        # 4. Regenerate GRUB config if any changes were made
+        if [ "$grub_modified" -eq 1 ]; then
             echo "  Regenerating GRUB configuration..." >&2
+            local grub_config_success=0
+
             if command -v grub2-mkconfig &> /dev/null; then
-                grub2-mkconfig -o /boot/grub2/grub.cfg >&2 2>&1
+                if grub2-mkconfig -o /boot/grub2/grub.cfg >&2 2>&1; then
+                    grub_config_success=1
+                else
+                    echo "  ERROR: grub2-mkconfig failed!" >&2
+                fi
             elif command -v grub-mkconfig &> /dev/null; then
-                grub-mkconfig -o /boot/grub/grub.cfg >&2 2>&1
+                if grub-mkconfig -o /boot/grub/grub.cfg >&2 2>&1; then
+                    grub_config_success=1
+                else
+                    echo "  ERROR: grub-mkconfig failed!" >&2
+                fi
             else
-                echo "  Warning: Could not find grub2-mkconfig or grub-mkconfig" >&2
+                echo "  ERROR: Could not find grub2-mkconfig or grub-mkconfig" >&2
             fi
 
-            echo "✓ GRUB configured for one-time boot (GRUB_DEFAULT=saved)" >&2
+            if [ "$grub_config_success" -ne 1 ]; then
+                echo "  WARNING: GRUB config regeneration failed - changes may not take effect!" >&2
+                return 1
+            fi
+
+            echo "✓ GRUB configured for one-time boot (GRUB_DEFAULT=saved, timeout=5s)" >&2
         else
-            echo "✓ GRUB already configured for one-time boot" >&2
+            echo "✓ GRUB already configured correctly for one-time boot" >&2
+        fi
+
+        # 5. Verify final configuration state
+        local final_grub_default=$(grep '^GRUB_DEFAULT=' /etc/default/grub 2>/dev/null | cut -d= -f2)
+        local final_timeout=$(grep '^GRUB_TIMEOUT=' /etc/default/grub 2>/dev/null | cut -d= -f2)
+        local final_timeout_style=$(grep '^GRUB_TIMEOUT_STYLE=' /etc/default/grub 2>/dev/null | cut -d= -f2)
+
+        if [ "$final_grub_default" != "saved" ] || [ "$final_timeout" != "5" ] || [ "$final_timeout_style" != "countdown" ]; then
+            echo "  ERROR: GRUB configuration verification failed!" >&2
+            echo "    GRUB_DEFAULT: ${final_grub_default:-<not set>} (expected: saved)" >&2
+            echo "    GRUB_TIMEOUT: ${final_timeout:-<not set>} (expected: 5)" >&2
+            echo "    GRUB_TIMEOUT_STYLE: ${final_timeout_style:-<not set>} (expected: countdown)" >&2
+            return 1
         fi
     else
-        echo "Warning: /etc/default/grub not found - GRUB configuration may not persist" >&2
+        echo "ERROR: /etc/default/grub not found - cannot configure GRUB" >&2
+        return 1
     fi
 
     chmod 600 "$BISECT_DIR/protected-kernels.list" "$BISECT_DIR/safe-kernel.info"
