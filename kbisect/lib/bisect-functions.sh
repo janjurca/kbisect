@@ -264,7 +264,22 @@ get_disk_space() {
 }
 
 verify_onetime_boot() {
-    # Check if saved_entry is set (indicates one-time boot is configured)
+    # On RHEL 8+/BLS, grub2-reboot sets next_entry (one-time boot)
+    # On RHEL 7/older, grub2-reboot modifies saved_entry with boot_once flag
+    local next_entry=""
+
+    if command -v grub2-editenv &> /dev/null; then
+        next_entry=$(grub2-editenv list 2>/dev/null | grep '^next_entry=' | cut -d= -f2)
+    elif command -v grub-editenv &> /dev/null; then
+        next_entry=$(grub-editenv list 2>/dev/null | grep '^next_entry=' | cut -d= -f2)
+    fi
+
+    if [ -n "$next_entry" ]; then
+        echo "✓ One-time boot entry set (next_entry): $next_entry" >&2
+        return 0
+    fi
+
+    # Fallback: check saved_entry for older systems using boot_once mechanism
     local saved_entry=""
     if command -v grub2-editenv &> /dev/null; then
         saved_entry=$(grub2-editenv list 2>/dev/null | grep '^saved_entry=' | cut -d= -f2)
@@ -272,13 +287,13 @@ verify_onetime_boot() {
         saved_entry=$(grub-editenv list 2>/dev/null | grep '^saved_entry=' | cut -d= -f2)
     fi
 
-    if [ -z "$saved_entry" ]; then
-        echo "⚠ WARNING: saved_entry is not set!" >&2
-        return 1
+    if [ -n "$saved_entry" ]; then
+        echo "✓ One-time boot entry set (saved_entry): $saved_entry" >&2
+        return 0
     fi
 
-    echo "✓ One-time boot entry set: $saved_entry" >&2
-    return 0
+    echo "⚠ WARNING: Neither next_entry nor saved_entry is set!" >&2
+    return 1
 }
 
 # ============================================================================
@@ -500,6 +515,34 @@ build_kernel() {
         grub-mkconfig -o /boot/grub/grub.cfg >&2 2>/dev/null
     fi
 
+    # CRITICAL: Restore protected kernel as permanent GRUB default
+    # make install / kernel-install hooks may have changed saved_entry to the new kernel.
+    # The protected kernel must remain as the fallback for boot failures.
+    if [ -f "$BISECT_DIR/safe-kernel.info" ]; then
+        source "$BISECT_DIR/safe-kernel.info"
+        if [ -n "$SAFE_KERNEL_IMAGE" ] && command -v grubby &> /dev/null; then
+            echo "Restoring protected kernel as permanent default..." >&2
+            if ! grubby --set-default="$SAFE_KERNEL_IMAGE" 2>&1; then
+                echo "ERROR: Failed to restore protected kernel as default" >&2
+                git restore Makefile
+                return 1
+            fi
+            local default_kernel=$(grubby --default-kernel 2>/dev/null)
+            if [ "$default_kernel" != "$SAFE_KERNEL_IMAGE" ]; then
+                echo "ERROR: Default kernel verification failed after restore" >&2
+                echo "  Expected: $SAFE_KERNEL_IMAGE" >&2
+                echo "  Actual: $default_kernel" >&2
+                git restore Makefile
+                return 1
+            fi
+            echo "✓ Protected kernel confirmed as permanent default: $SAFE_KERNEL_VERSION" >&2
+        fi
+    else
+        echo "ERROR: $BISECT_DIR/safe-kernel.info not found - protection not initialized" >&2
+        git restore Makefile
+        return 1
+    fi
+
     # Get kernel version
     local kernel_version=$(make kernelrelease 2>/dev/null)
     local bootfile="/boot/vmlinuz-${kernel_version}"
@@ -541,7 +584,7 @@ build_kernel() {
         # Verify it was set
         if ! verify_onetime_boot; then
             echo "ERROR: One-time boot verification failed" >&2
-            echo "  grub2-reboot command succeeded but saved_entry was not set" >&2
+            echo "  grub2-reboot command succeeded but neither next_entry nor saved_entry was set" >&2
             return 1
         fi
 
