@@ -2351,14 +2351,64 @@ class BisectMaster:
                 same_commit_count += 1
                 logger.warning(f"Still on same commit {commit[:8]} (attempt {same_commit_count}/{MAX_SAME_COMMIT})")
 
-                if same_commit_count >= MAX_SAME_COMMIT:
-                    logger.error(f"STUCK ON SAME COMMIT: Git bisect has returned the same commit {commit[:8]} for {same_commit_count} consecutive iterations. This indicates git bisect has run out of viable commits to test, or there's a problem with the repository state. Stopping bisection.")
-                    self.state.update_session(
-                        self.session_id,
-                        status="failed",
-                        end_time=datetime.utcnow().isoformat(),
-                    )
-                    return False
+                # The previous iteration likely failed to record git bisect skip
+                # (e.g., SSH was down during mark_commit). Try to recover.
+                first_host = self.host_managers[0]
+
+                # Ensure SSH is up
+                if not first_host.ssh.is_alive():
+                    logger.info("SSH is down - recovering host before retrying skip...")
+                    if not self._recover_host(first_host):
+                        logger.error("Host recovery failed - cannot retry skip")
+                        if same_commit_count >= MAX_SAME_COMMIT:
+                            logger.error(f"STUCK ON SAME COMMIT: Git bisect has returned the same commit {commit[:8]} for {same_commit_count} consecutive iterations. Host recovery failed. Stopping bisection.")
+                            self.state.update_session(
+                                self.session_id,
+                                status="failed",
+                                end_time=datetime.utcnow().isoformat(),
+                            )
+                            return False
+                        continue
+
+                # Retry marking the commit as SKIP
+                logger.info(f"Retrying git bisect skip for stuck commit {commit[:8]}...")
+                success, bisection_complete = self.mark_commit(commit, TestResult.SKIP)
+
+                if success:
+                    if bisection_complete:
+                        logger.info("\n=== Bisection Found First Bad Commit! ===")
+                        first_bad = self._extract_first_bad_commit()
+                        if first_bad:
+                            logger.info(f"First bad commit: {first_bad}")
+                        self.state.update_session(
+                            self.session_id,
+                            result_commit=first_bad,
+                            status="completed",
+                            end_time=datetime.utcnow().isoformat(),
+                        )
+                        self.generate_report()
+                        return True
+
+                    # Skip recorded - get the new next commit
+                    commit = self.get_next_commit()
+                    if not commit:
+                        logger.info("No more commits to test after skip retry - bisection complete!")
+                        break
+
+                    logger.info(f"Recovered from stuck state - now testing commit {commit[:8]}")
+                    same_commit_count = 0
+                    previous_commit = commit
+                else:
+                    logger.error("Retry of git bisect skip also failed")
+                    if same_commit_count >= MAX_SAME_COMMIT:
+                        logger.error(f"STUCK ON SAME COMMIT: Git bisect has returned the same commit {commit[:8]} for {same_commit_count} consecutive iterations. All skip retries failed. Stopping bisection.")
+                        self.state.update_session(
+                            self.session_id,
+                            status="failed",
+                            end_time=datetime.utcnow().isoformat(),
+                        )
+                        return False
+                    continue
             else:
                 # Reset counter when we move to a different commit
                 same_commit_count = 0
