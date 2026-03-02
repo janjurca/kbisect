@@ -1685,6 +1685,62 @@ class BisectMaster:
 
             return True, None, None
 
+    def _recover_host(self, host_manager: HostManager) -> bool:
+        """Power-cycle a failed host and wait for SSH to come back.
+
+        Used after boot failures to restore the host to the protected kernel
+        so that git bisect operations can proceed.
+
+        Args:
+            host_manager: HostManager for the host to recover
+
+        Returns:
+            True if host recovered (SSH responsive), False otherwise
+        """
+        hostname = host_manager.config.hostname
+
+        if not host_manager.power_controller:
+            logger.warning(f"  [{hostname}] No power controller available - cannot recover host")
+            return False
+
+        logger.info(f"  [{hostname}] Attempting host recovery via power cycle...")
+
+        # Try power_cycle first
+        try:
+            if not host_manager.power_controller.power_cycle():
+                logger.warning(f"  [{hostname}] Power cycle failed, attempting emergency recovery...")
+                # Escalate to emergency_recovery (IPMI has real impl, Beaker base returns False)
+                try:
+                    if not host_manager.power_controller.emergency_recovery():
+                        logger.error(f"  [{hostname}] Emergency recovery also failed")
+                        return False
+                except Exception as e:
+                    logger.error(f"  [{hostname}] Emergency recovery raised exception: {e}")
+                    return False
+        except Exception as e:
+            logger.error(f"  [{hostname}] Power cycle raised exception: {e}")
+            # Try emergency recovery as fallback
+            try:
+                if not host_manager.power_controller.emergency_recovery():
+                    logger.error(f"  [{hostname}] Emergency recovery also failed")
+                    return False
+            except Exception as e2:
+                logger.error(f"  [{hostname}] Emergency recovery raised exception: {e2}")
+                return False
+
+        # Wait for SSH to come back
+        logger.info(f"  [{hostname}] Waiting for SSH to come back (timeout: {host_manager.boot_timeout}s)...")
+        boot_start = time.time()
+
+        while not host_manager.ssh.is_alive():
+            if time.time() - boot_start > host_manager.boot_timeout:
+                logger.error(f"  [{hostname}] Recovery timeout - host did not come back after {host_manager.boot_timeout}s")
+                return False
+            time.sleep(5)
+
+        logger.info(f"  [{hostname}] Host recovered successfully - SSH is responsive")
+        return True
+
     def _test_on_host(self, host_manager: HostManager, iteration_id: int) -> Tuple[TestResult, str]:
         """Run test on a specific host using its configured test script.
 
@@ -1950,6 +2006,17 @@ class BisectMaster:
 
             iteration.result = TestResult.SKIP
             iteration.error = "; ".join(errors) if errors else "Boot failed on one or more hosts"
+
+            # Recover failed hosts so SSH is available for git bisect skip
+            for host_manager in self.host_managers:
+                result_data = reboot_results.get(host_manager.host_id, {})
+                if not result_data.get("success"):
+                    hostname = host_manager.config.hostname
+                    logger.info(f"  [{hostname}] Attempting recovery after boot failure...")
+                    if self._recover_host(host_manager):
+                        logger.info(f"  [{hostname}] Recovery successful - host booted into protected kernel")
+                    else:
+                        logger.error(f"  [{hostname}] Recovery failed - host may be unreachable")
 
             # Prepare bulk results for all hosts
             bulk_results = []
@@ -2253,8 +2320,31 @@ class BisectMaster:
             commit = self.get_next_commit()
 
             if not commit:
-                logger.info("No more commits to test - bisection complete!")
-                break
+                # Distinguish genuine bisection completion from SSH failure
+                first_host = self.host_managers[0]
+                if first_host.ssh.is_alive():
+                    logger.info("No more commits to test - bisection complete!")
+                    break
+
+                # SSH is down - attempt recovery
+                logger.warning("get_next_commit() returned None but SSH is down - attempting host recovery...")
+                if self._recover_host(first_host):
+                    # Retry once after recovery
+                    commit = self.get_next_commit()
+                    if commit:
+                        logger.info(f"Recovery successful - continuing bisection with commit {commit[:8]}")
+                    else:
+                        # SSH is back but still no commit - genuinely complete
+                        logger.info("No more commits to test after recovery - bisection complete!")
+                        break
+                else:
+                    logger.error("Host recovery failed - cannot continue bisection")
+                    self.state.update_session(
+                        self.session_id,
+                        status="failed",
+                        end_time=datetime.utcnow().isoformat(),
+                    )
+                    return False
 
             # Check if we're stuck on the same commit
             if commit == previous_commit:
