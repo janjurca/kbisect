@@ -1063,6 +1063,18 @@ class BisectMaster:
         first_host = self.host_managers[0]
         kernel_path = first_host.config.kernel_path
 
+        # Remove stale .git/index.lock before bisect command.
+        # A killed git process (from build timeout or SSH disconnect) can leave
+        # this lock file behind, causing all subsequent git operations to fail
+        # with "Unable to create '.../.git/index.lock': File exists".
+        lock_path = f"{shlex.quote(kernel_path)}/.git/index.lock"
+        ret_lock, _, _ = first_host.ssh.run_command(
+            f"rm -f {lock_path}",
+            timeout=first_host.ssh_connect_timeout,
+        )
+        if ret_lock != 0:
+            logger.warning(f"Failed to remove {lock_path} (non-fatal)")
+
         logger.debug(f"Executing: cd {kernel_path} && {bisect_cmd}")
         ret, stdout, stderr = first_host.ssh.run_command(f"cd {shlex.quote(kernel_path)} && {bisect_cmd}", timeout=first_host.ssh_connect_timeout)
 
@@ -1930,6 +1942,24 @@ class BisectMaster:
 
             # Store all results in a single transaction
             self.state.create_iteration_results_bulk(bulk_results)
+
+            # Kill lingering make/git processes on the first host before
+            # mark_commit(). When a build times out, process.kill() only kills
+            # the local SSH process. The remote bash shell receives SIGHUP
+            # asynchronously and may still be running git/make commands that
+            # write to .git/index. If we start mark_commit() (which runs
+            # git bisect skip → git checkout) while the old process is still
+            # dying, both write to .git/index concurrently and corrupt it.
+            first_host = self.host_managers[0]
+            kernel_path = first_host.config.kernel_path
+            cleanup_cmd = (
+                f"pkill -9 -f 'make.*-j' 2>/dev/null; "
+                f"pkill -9 -f 'git' 2>/dev/null; "
+                f"rm -f {shlex.quote(kernel_path)}/.git/index.lock 2>/dev/null; "
+                f"sleep 1"
+            )
+            logger.debug("Killing lingering build processes before mark_commit")
+            first_host.ssh.run_command(cleanup_cmd, timeout=first_host.ssh_connect_timeout)
 
             success, bisection_complete = self.mark_commit(commit_sha, TestResult.SKIP)
             if not success:

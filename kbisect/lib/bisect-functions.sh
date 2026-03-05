@@ -93,12 +93,12 @@ EOF
         fi
 
         # 3. Configure GRUB_TIMEOUT_STYLE (always check and fix if needed)
-        # This ensures countdown timer is shown and auto-boot works
+        # Use "menu" for maximum compatibility across console/terminal configurations
         local current_timeout_style=$(grep '^GRUB_TIMEOUT_STYLE=' /etc/default/grub 2>/dev/null | cut -d= -f2)
-        if [ "$current_timeout_style" != "countdown" ]; then
-            echo "  Setting GRUB_TIMEOUT_STYLE=countdown in /etc/default/grub" >&2
+        if [ "$current_timeout_style" != "menu" ]; then
+            echo "  Setting GRUB_TIMEOUT_STYLE=menu in /etc/default/grub" >&2
             sed -i '/^GRUB_TIMEOUT_STYLE=/d' /etc/default/grub
-            echo 'GRUB_TIMEOUT_STYLE=countdown' >> /etc/default/grub
+            echo 'GRUB_TIMEOUT_STYLE=menu' >> /etc/default/grub
             grub_modified=1
         fi
 
@@ -138,11 +138,11 @@ EOF
         local final_timeout=$(grep '^GRUB_TIMEOUT=' /etc/default/grub 2>/dev/null | cut -d= -f2)
         local final_timeout_style=$(grep '^GRUB_TIMEOUT_STYLE=' /etc/default/grub 2>/dev/null | cut -d= -f2)
 
-        if [ "$final_grub_default" != "saved" ] || [ "$final_timeout" != "5" ] || [ "$final_timeout_style" != "countdown" ]; then
+        if [ "$final_grub_default" != "saved" ] || [ "$final_timeout" != "5" ] || [ "$final_timeout_style" != "menu" ]; then
             echo "  ERROR: GRUB configuration verification failed!" >&2
             echo "    GRUB_DEFAULT: ${final_grub_default:-<not set>} (expected: saved)" >&2
             echo "    GRUB_TIMEOUT: ${final_timeout:-<not set>} (expected: 5)" >&2
-            echo "    GRUB_TIMEOUT_STYLE: ${final_timeout_style:-<not set>} (expected: countdown)" >&2
+            echo "    GRUB_TIMEOUT_STYLE: ${final_timeout_style:-<not set>} (expected: menu)" >&2
             return 1
         fi
     else
@@ -408,6 +408,15 @@ build_kernel() {
     local kernel_path="${2:-$KERNEL_PATH}"
     local kernel_config="${3:-}"
 
+    # Prevent SIGHUP from running error handlers (git restore Makefile) when SSH
+    # is killed. Without this trap, a killed SSH session causes the remote bash
+    # shell to receive SIGHUP asynchronously, which triggers ERR/EXIT traps and
+    # runs "git restore Makefile" while the orchestrator may already be starting
+    # a new SSH session for git bisect — causing concurrent .git/index writes
+    # and index corruption. The dirty Makefile is harmless because the next
+    # iteration starts with "git reset --hard HEAD".
+    trap 'echo "SIGHUP received in build_kernel, exiting immediately" >&2; exit 1' HUP
+
     echo "====================================================================" >&2
     echo "Building kernel for commit: $commit" >&2
     echo "====================================================================" >&2
@@ -469,6 +478,10 @@ build_kernel() {
     # Checkout commit
     git checkout "$commit" 2>&1 || return 1
 
+    # Flush .git/index to disk after checkout to prevent corruption if the host
+    # is later power-cycled via IPMI before the write-back cache is flushed
+    sync
+
     # Create build label
     local label="bisect-${commit:0:7}"
 
@@ -508,12 +521,57 @@ build_kernel() {
         return 1
     }
 
-    # Update GRUB
-    if command -v grub2-mkconfig &> /dev/null; then
-        grub2-mkconfig -o /boot/grub2/grub.cfg >&2 2>/dev/null
-    elif command -v grub-mkconfig &> /dev/null; then
-        grub-mkconfig -o /boot/grub/grub.cfg >&2 2>/dev/null
+    # Verify initramfs was generated (CRITICAL for boot)
+    # make install triggers kernel-install which should run dracut, but if dracut
+    # fails silently the kernel installs WITHOUT an initramfs. The kernel loads
+    # but halts when it can't mount root (no disk/filesystem drivers).
+    local built_version=$(make kernelrelease 2>/dev/null)
+    local initramfs_path="/boot/initramfs-${built_version}.img"
+
+    if [ ! -f "$initramfs_path" ]; then
+        echo "⚠ Initramfs not found at $initramfs_path after make install" >&2
+        echo "  Generating initramfs with dracut..." >&2
+
+        if command -v dracut &> /dev/null; then
+            if ! dracut --force "$initramfs_path" "$built_version" >&2 2>&1; then
+                echo "ERROR: dracut failed to generate initramfs" >&2
+                git restore Makefile
+                return 1
+            fi
+
+            if [ ! -f "$initramfs_path" ]; then
+                echo "ERROR: dracut completed but initramfs still missing at $initramfs_path" >&2
+                git restore Makefile
+                return 1
+            fi
+
+            echo "✓ Initramfs generated with dracut: $initramfs_path" >&2
+        else
+            echo "ERROR: dracut not available and initramfs is missing" >&2
+            echo "  The kernel will fail to boot without an initramfs" >&2
+            git restore Makefile
+            return 1
+        fi
+    else
+        echo "✓ Initramfs verified: $initramfs_path" >&2
     fi
+
+    # Update GRUB
+    echo "Regenerating GRUB configuration..." >&2
+    if command -v grub2-mkconfig &> /dev/null; then
+        if ! grub2-mkconfig -o /boot/grub2/grub.cfg >&2 2>&1; then
+            echo "ERROR: grub2-mkconfig failed" >&2
+            git restore Makefile
+            return 1
+        fi
+    elif command -v grub-mkconfig &> /dev/null; then
+        if ! grub-mkconfig -o /boot/grub/grub.cfg >&2 2>&1; then
+            echo "ERROR: grub-mkconfig failed" >&2
+            git restore Makefile
+            return 1
+        fi
+    fi
+    echo "✓ GRUB configuration updated" >&2
 
     # CRITICAL: Restore protected kernel as permanent GRUB default
     # make install / kernel-install hooks may have changed saved_entry to the new kernel.
@@ -522,7 +580,7 @@ build_kernel() {
         source "$BISECT_DIR/safe-kernel.info"
         if [ -n "$SAFE_KERNEL_IMAGE" ] && command -v grubby &> /dev/null; then
             echo "Restoring protected kernel as permanent default..." >&2
-            if ! grubby --set-default="$SAFE_KERNEL_IMAGE" 2>&1; then
+            if ! grubby --set-default="$SAFE_KERNEL_IMAGE" >&2 2>&1; then
                 echo "ERROR: Failed to restore protected kernel as default" >&2
                 git restore Makefile
                 return 1
@@ -575,7 +633,7 @@ build_kernel() {
 
         echo "BLS entry ID: $entry_id" >&2
 
-        if ! grub2-reboot "$entry_id" 2>&1; then
+        if ! grub2-reboot "$entry_id" >&2 2>&1; then
             echo "ERROR: grub2-reboot failed with BLS entry ID" >&2
             echo "  Tried: grub2-reboot \"$entry_id\"" >&2
             return 1
@@ -594,7 +652,7 @@ build_kernel() {
         # Debian/Ubuntu - Use kernel version
         echo "Using grub-reboot for: $kernel_version" >&2
 
-        if ! grub-reboot "$kernel_version" 2>&1; then
+        if ! grub-reboot "$kernel_version" >&2 2>&1; then
             echo "ERROR: grub-reboot failed for kernel $kernel_version" >&2
             return 1
         fi
