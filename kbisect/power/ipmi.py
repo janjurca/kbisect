@@ -60,6 +60,7 @@ class IPMIController(PowerController):
         password: str,
         ssh_host: Optional[str] = None,
         ssh_connect_timeout: int = 15,
+        cipher_suite: Optional[int] = None,
     ) -> None:
         """Initialize IPMI controller.
 
@@ -69,12 +70,14 @@ class IPMIController(PowerController):
             password: IPMI password
             ssh_host: SSH hostname for reboot verification (defaults to host if not provided)
             ssh_connect_timeout: SSH connection timeout in seconds
+            cipher_suite: IPMI cipher suite number (e.g. 3 for NVIDIA Grace)
         """
         self.host = host
         self.user = user
         self.password = password
         self.ssh_host = ssh_host or host
         self.ssh_connect_timeout = ssh_connect_timeout
+        self.cipher_suite = cipher_suite
 
     def _run_ipmi_command(
         self, args: List[str], timeout: int = DEFAULT_IPMI_TIMEOUT
@@ -115,8 +118,10 @@ class IPMIController(PowerController):
                 self.user,
                 "-f",
                 password_file,
-                *args,
             ]
+            if self.cipher_suite is not None:
+                cmd.extend(["-C", str(self.cipher_suite)])
+            cmd.extend(args)
 
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout, check=False
@@ -573,12 +578,13 @@ def main() -> int:
         default="status",
         help="Action to perform",
     )
+    parser.add_argument("--cipher-suite", type=int, default=None, help="IPMI cipher suite")
 
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    controller = IPMIController(args.ipmi_host, args.user, args.password)
+    controller = IPMIController(args.ipmi_host, args.user, args.password, cipher_suite=args.cipher_suite)
 
     if args.action == "status":
         state = controller.get_power_status()

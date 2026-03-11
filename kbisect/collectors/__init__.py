@@ -20,6 +20,7 @@ def create_console_collector(
     ipmi_host: Optional[str] = None,
     ipmi_user: Optional[str] = None,
     ipmi_password: Optional[str] = None,
+    ipmi_cipher_suite: Optional[int] = None,
 ) -> ConsoleCollector:
     """
     Create appropriate console collector based on type and available tools.
@@ -30,6 +31,7 @@ def create_console_collector(
         ipmi_host: IPMI hostname (required for IPMI SOL)
         ipmi_user: IPMI username (required for IPMI SOL)
         ipmi_password: IPMI password (required for IPMI SOL)
+        ipmi_cipher_suite: IPMI cipher suite number (e.g. 3 for NVIDIA Grace)
 
     Returns:
         ConsoleCollector instance (ConserverCollector or IPMISOLCollector)
@@ -54,6 +56,7 @@ def create_console_collector(
             ipmi_host=ipmi_host,  # type: ignore
             ipmi_user=ipmi_user,  # type: ignore
             ipmi_password=ipmi_password,  # type: ignore
+            cipher_suite=ipmi_cipher_suite,
         )
 
     elif collector_type == "auto":
@@ -87,6 +90,7 @@ def create_console_collector(
             ipmi_host=ipmi_host,  # type: ignore
             ipmi_user=ipmi_user,  # type: ignore
             ipmi_password=ipmi_password,  # type: ignore
+            cipher_suite=ipmi_cipher_suite,
         )
 
     else:

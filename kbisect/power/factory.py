@@ -50,6 +50,7 @@ def create_power_controller(
             host_config.ipmi_password,
             ssh_host=host_config.hostname,
             ssh_connect_timeout=ssh_connect_timeout,
+            cipher_suite=host_config.ipmi_cipher_suite,
         )
 
     # Beaker power control

@@ -23,6 +23,7 @@ class HostConfig:
         ipmi_host: Optional IPMI interface hostname or IP
         ipmi_user: Optional IPMI username
         ipmi_password: Optional IPMI password
+        ipmi_cipher_suite: Optional IPMI cipher suite number (e.g. 3 for NVIDIA Grace)
         console_enabled: Enable console log collection for this host
         console_collector_type: Console collector type ("conserver", "ipmi", "auto")
         console_hostname: Console hostname for this host (defaults to hostname if not specified)
@@ -38,6 +39,7 @@ class HostConfig:
     ipmi_host: Optional[str] = None
     ipmi_user: Optional[str] = None
     ipmi_password: Optional[str] = None
+    ipmi_cipher_suite: Optional[int] = None
 
     # Console log collection (per-host)
     console_enabled: bool = False                # Enable/disable console collection for this host

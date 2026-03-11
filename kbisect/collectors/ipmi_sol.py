@@ -39,6 +39,7 @@ class IPMISOLCollector(ConsoleCollector):
         ipmi_user: str,
         ipmi_password: str,
         max_buffer_lines: int = DEFAULT_MAX_BUFFER_LINES,
+        cipher_suite: Optional[int] = None,
     ) -> None:
         """Initialize IPMI SOL collector.
 
@@ -48,11 +49,13 @@ class IPMISOLCollector(ConsoleCollector):
             ipmi_user: IPMI username
             ipmi_password: IPMI password
             max_buffer_lines: Maximum lines to buffer
+            cipher_suite: IPMI cipher suite number (e.g. 3 for NVIDIA Grace)
         """
         super().__init__(hostname, max_buffer_lines)
         self.ipmi_host = ipmi_host
         self.ipmi_user = ipmi_user
         self.ipmi_password = ipmi_password
+        self.cipher_suite = cipher_suite
         self.collection_thread: Optional[threading.Thread] = None
         self.stop_requested = False
         self.lock = threading.Lock()
@@ -101,6 +104,7 @@ class IPMISOLCollector(ConsoleCollector):
                 host=self.ipmi_host,
                 user=self.ipmi_user,
                 password=self.ipmi_password,
+                cipher_suite=self.cipher_suite,
             )
 
             # Use a very long duration - we'll stop it manually

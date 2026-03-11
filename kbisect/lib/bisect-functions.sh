@@ -678,6 +678,12 @@ build_kernel() {
     git restore Makefile
     rm -f Makefile.bisect-backup
 
+    # Flush all filesystem changes to disk before IPMI reboot.
+    # Without this, the .git/index rewrite from "git restore Makefile" above
+    # sits in the page cache and is lost when IPMI cuts power ~3ms later,
+    # leaving a truncated index file on the next boot.
+    sync
+
     # Output kernel version (for master to capture)
     echo "$kernel_version"
     return 0

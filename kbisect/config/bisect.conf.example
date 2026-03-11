@@ -38,6 +38,7 @@ hosts:
     ipmi_host: 192.168.1.101          # IPMI interface for this host
     ipmi_user: admin
     ipmi_password: changeme
+    # ipmi_cipher_suite: 3            # IPMI cipher suite (e.g. 3 for NVIDIA Grace machines)
 
     # Console log collection (per-host, optional)
     console_enabled: true              # Enable console collection for this host

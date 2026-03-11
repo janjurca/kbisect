@@ -138,6 +138,7 @@ def create_bisect_config(config_dict: Dict[str, Any], _args: Any) -> BisectConfi
             ipmi_host=host_dict.get("ipmi_host"),
             ipmi_user=host_dict.get("ipmi_user"),
             ipmi_password=host_dict.get("ipmi_password"),
+            ipmi_cipher_suite=host_dict.get("ipmi_cipher_suite"),
             # Per-host console configuration
             console_enabled=host_dict.get("console_enabled", False),
             console_collector_type=host_dict.get("console_collector", "auto"),
@@ -651,6 +652,7 @@ def cmd_power(args: argparse.Namespace) -> int:
                 ipmi_host=host_dict.get("ipmi_host"),
                 ipmi_user=host_dict.get("ipmi_user"),
                 ipmi_password=host_dict.get("ipmi_password"),
+                ipmi_cipher_suite=host_dict.get("ipmi_cipher_suite"),
             )
 
             # Create controller using factory

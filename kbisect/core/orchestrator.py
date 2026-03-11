@@ -156,6 +156,7 @@ class HostManager:
                     ipmi_host=host_config.ipmi_host,
                     ipmi_user=host_config.ipmi_user,
                     ipmi_password=host_config.ipmi_password,
+                    ipmi_cipher_suite=host_config.ipmi_cipher_suite,
                 )
 
                 logger.info(
