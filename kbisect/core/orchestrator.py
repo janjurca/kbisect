@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
 from kbisect.collectors import create_console_collector
 from kbisect.config.config import BisectConfig, HostConfig
-from kbisect.power.base import BootDevice
 from kbisect.remote import SSHClient
 
 
@@ -146,7 +145,10 @@ class HostManager:
             console_hostname = host_config.console_hostname or host_config.hostname
 
             try:
-                logger.debug(f"[{host_config.hostname}] Creating console collector (type={host_config.console_collector_type}, console_host={console_hostname})")
+                logger.debug(
+                    f"[{host_config.hostname}] Creating console collector "
+                    f"(type={host_config.console_collector_type}, console_host={console_hostname})"
+                )
 
                 self.console_collector = create_console_collector(
                     collector_type=host_config.console_collector_type,
@@ -157,10 +159,15 @@ class HostManager:
                     ipmi_cipher_suite=host_config.ipmi_cipher_suite,
                 )
 
-                logger.info(f"[{host_config.hostname}] Console collector created: {type(self.console_collector).__name__}")
+                logger.info(
+                    f"[{host_config.hostname}] Console collector created: "
+                    f"{type(self.console_collector).__name__}"
+                )
 
             except Exception as exc:
-                logger.warning(f"[{host_config.hostname}] Failed to create console collector: {exc}")
+                logger.warning(
+                    f"[{host_config.hostname}] Failed to create console collector: {exc}"
+                )
                 logger.warning(f"[{host_config.hostname}] Console logs will not be collected")
                 self.console_collector = None
         else:
@@ -1203,7 +1210,12 @@ class BisectMaster:
         # Check if bisection just completed
         # Git bisect outputs "<sha> is the first bad commit" when it successfully finds the culprit
         # Don't match other messages like "could be any of" or "cannot determine"
-        bisection_complete = "is the first bad commit" in stdout or "is the first bad commit" in stderr or "is first bad commit" in stdout or "is first bad commit" in stderr
+        bisection_complete = (
+            "is the first bad commit" in stdout
+            or "is the first bad commit" in stderr
+            or "is first bad commit" in stdout
+            or "is first bad commit" in stderr
+        )
 
         logger.info(f"Marked commit {commit_sha[:SHORT_COMMIT_LENGTH]} as {result.value}")
 
@@ -1524,7 +1536,10 @@ class BisectMaster:
             console_output = host_manager.console_collector.stop()
 
             if console_output:
-                logger.debug(f"[{hostname}] Console collector stopped, captured {len(console_output)} bytes")
+                logger.debug(
+                    f"[{hostname}] Console collector stopped, "
+                    f"captured {len(console_output)} bytes"
+                )
 
                 # Store in database
                 self._store_console_log(
@@ -1537,7 +1552,9 @@ class BisectMaster:
                 logger.debug(f"[{hostname}] No console output captured")
 
         except Exception as exc:
-            logger.warning(f"[{hostname}] Error stopping console collector: {exc} (non-fatal)")
+            logger.warning(
+                f"[{hostname}] Error stopping console collector: {exc} (non-fatal)"
+            )
 
     def _store_console_log(
         self,
@@ -1579,7 +1596,10 @@ class BisectMaster:
             # Finalize immediately (console logs collected all at once, not streamed)
             self.state.finalize_build_log(log_id, exit_code=0)
 
-            logger.info(f"[{hostname}] Stored console log (log_id={log_id}, size={len(console_output)} bytes)")
+            logger.info(
+                f"[{hostname}] Stored console log "
+                f"(log_id={log_id}, size={len(console_output)} bytes)"
+            )
 
         except Exception as exc:
             logger.error(f"[{hostname}] Failed to store console log: {exc}")
@@ -1609,36 +1629,17 @@ class BisectMaster:
                 else:
                     logger.warning(f"[{hostname}] Console collection failed to start (non-fatal)")
             except Exception as exc:
-                logger.warning(f"[{hostname}] Exception starting console collector: {exc} (non-fatal)")
+                logger.warning(
+                    f"[{hostname}] Exception starting console collector: {exc} (non-fatal)"
+                )
 
-        # If power control is available, proactively force one-time disk boot
-        # for this reboot attempt. This helps avoid PXE/UEFI shell fall-through
-        # even when reboot is triggered via SSH.
+        # Use power controller if available, otherwise fall back to SSH reboot
         if host_manager.power_controller:
-            if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
-                logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before reboot")
+            logger.info(f"  [{hostname}] Using {host_manager.config.power_control_type} power control for reboot")
+            if not host_manager.power_controller.reset():
+                logger.error(f"  [{hostname}] Power controller reset failed")
 
-        # Prefer graceful reboot via SSH first (with sync) so grubenv one-time
-        # entry is reliably persisted and consumed on the next boot.
-        reboot_cmd = "nohup sh -c 'sync; sleep 1; systemctl reboot || reboot' >/dev/null 2>&1 &"
-        logger.info(f"  [{hostname}] Triggering graceful reboot via SSH")
-        ret, _stdout, stderr = host_manager.ssh.run_command(reboot_cmd, timeout=host_manager.ssh_connect_timeout)
-
-        if ret != 0:
-            if host_manager.power_controller:
-                logger.warning(f"  [{hostname}] SSH reboot command failed ({stderr.strip() or 'unknown error'}), falling back to {host_manager.config.power_control_type} reset")
-                # Ensure reset attempts a one-time local disk boot first.
-                if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
-                    logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before reset")
-                if not host_manager.power_controller.reset():
-                    logger.error(f"  [{hostname}] Power controller reset failed")
-
-                    # Stop and store console log on failure
-                    self._stop_and_store_console_log(host_manager, iteration_id)
-
-                    return False, None, "Both SSH reboot and power controller reset failed"
-            else:
-                logger.error(f"  [{hostname}] SSH reboot command failed: {stderr.strip() or 'unknown error'}")
+                # Stop and store console log on failure
                 self._stop_and_store_console_log(host_manager, iteration_id)
 
                 return False, None, "Power controller reset failed"
@@ -1716,10 +1717,6 @@ class BisectMaster:
             return False
 
         logger.info(f"  [{hostname}] Attempting host recovery via power cycle...")
-
-        # Force one-time disk boot before recovery operations.
-        if not host_manager.power_controller.set_boot_device(BootDevice.DISK, persistent=False):
-            logger.warning(f"  [{hostname}] Failed to set one-time boot device to disk before recovery")
 
         # Try power_cycle first
         try:
@@ -1956,7 +1953,12 @@ class BisectMaster:
             # dying, both write to .git/index concurrently and corrupt it.
             first_host = self.host_managers[0]
             kernel_path = first_host.config.kernel_path
-            cleanup_cmd = f"pkill -9 -f 'make.*-j' 2>/dev/null; pkill -9 -f 'git' 2>/dev/null; rm -f {shlex.quote(kernel_path)}/.git/index.lock 2>/dev/null; sleep 1"
+            cleanup_cmd = (
+                f"pkill -9 -f 'make.*-j' 2>/dev/null; "
+                f"pkill -9 -f 'git' 2>/dev/null; "
+                f"rm -f {shlex.quote(kernel_path)}/.git/index.lock 2>/dev/null; "
+                f"sleep 1"
+            )
             logger.debug("Killing lingering build processes before mark_commit")
             first_host.ssh.run_command(cleanup_cmd, timeout=first_host.ssh_connect_timeout)
 
