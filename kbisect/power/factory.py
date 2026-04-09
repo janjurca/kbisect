@@ -59,8 +59,28 @@ def create_power_controller(
 
         return BeakerController(host_config.hostname, ssh_connect_timeout)
 
+    # Redfish power control
+    if power_type == "redfish":
+        # Validate required credentials - reuses ipmi_host/user/password fields for BMC access
+        if not host_config.ipmi_host:
+            raise ValueError(f"Redfish configured for {host_config.hostname} but ipmi_host is missing")
+        if host_config.ipmi_user is None:
+            raise ValueError(f"Redfish configured for {host_config.hostname} but ipmi_user is missing")
+        if host_config.ipmi_password is None:
+            raise ValueError(f"Redfish configured for {host_config.hostname} but ipmi_password is missing")
+
+        from kbisect.power import RedfishController
+
+        return RedfishController(
+            host_config.ipmi_host,
+            host_config.ipmi_user,
+            host_config.ipmi_password,
+            ssh_host=host_config.hostname,
+            ssh_connect_timeout=ssh_connect_timeout,
+        )
+
     # Unknown power control type
     raise ValueError(
         f"Unknown power control type '{power_type}' for {host_config.hostname}. "
-        f"Valid types: 'ipmi', 'beaker', or None"
+        f"Valid types: 'ipmi', 'redfish', 'beaker', or None"
     )

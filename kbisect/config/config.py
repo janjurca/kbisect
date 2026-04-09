@@ -19,7 +19,7 @@ class HostConfig:
         bisect_path: Path to bisect library on host
         test_script: Path to test script for this host (role-specific)
         kernel_config_file: Path to kernel config file for this host (optional)
-        power_control_type: Power control method ("ipmi", "beaker", or None for SSH fallback)
+        power_control_type: Power control method ("ipmi", "redfish", "beaker", or None for SSH fallback)
         ipmi_host: Optional IPMI interface hostname or IP
         ipmi_user: Optional IPMI username
         ipmi_password: Optional IPMI password
