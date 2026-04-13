@@ -19,6 +19,12 @@ from kbisect.power.ipmi import (
     IPMIError,
     IPMITimeoutError,
 )
+from kbisect.power.redfish import (
+    RedfishCommandError,
+    RedfishController,
+    RedfishError,
+    RedfishTimeoutError,
+)
 
 
 __all__ = [
@@ -34,5 +40,9 @@ __all__ = [
     "PowerControlError",
     "PowerController",
     "PowerState",
+    "RedfishCommandError",
+    "RedfishController",
+    "RedfishError",
+    "RedfishTimeoutError",
     "create_power_controller",
 ]
