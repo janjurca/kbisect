@@ -61,7 +61,8 @@ class SSHClient(RemoteClient):
 
         try:
             result = subprocess.run(
-                ssh_command, capture_output=True, text=True, timeout=timeout, check=False
+                ssh_command, capture_output=True, text=True, timeout=timeout, check=False,
+                errors="replace",
             )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
@@ -141,6 +142,7 @@ class SSHClient(RemoteClient):
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # Line buffered
+                errors="replace",
             )
 
             stdout_lines = []
