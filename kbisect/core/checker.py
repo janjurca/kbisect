@@ -405,11 +405,11 @@ class SystemChecker:
         results = []
         hostname = host_config.hostname
 
-        # Check if console logs are enabled
-        if not self.config.collect_console_logs:
+        # Check if console logs are enabled (per-host configuration)
+        if not host_config.console_enabled:
             return results
 
-        collector_type = self.config.console_collector_type
+        collector_type = host_config.console_collector_type
 
         if collector_type in ["conserver", "auto"]:
             # Check for console command
@@ -464,7 +464,7 @@ class SystemChecker:
 
         # Per-host checks
         for host_config in self.config.hosts:
-            hostname = host_config["hostname"]
+            hostname = host_config.hostname
             logger.info(f"Checking host: {hostname}")
 
             # SSH connectivity
