@@ -1234,6 +1234,20 @@ def cmd_build(args: argparse.Namespace) -> int:
         print("✗ Config file must have 'hosts' section")
         return 1
 
+    # Verify hosts are initialized (bisect library deployed by init/deploy)
+    ssh_connect_timeout = config_dict.get("timeouts", {}).get("ssh_connect", 15)
+    for host_dict in config_dict["hosts"]:
+        deployer = SlaveDeployer(
+            host_dict["hostname"],
+            host_dict.get("ssh_user", "root"),
+            host_dict.get("bisect_path", "/root/kernel-bisect/lib"),
+            connect_timeout=ssh_connect_timeout,
+        )
+        if not deployer.is_deployed():
+            print(f"✗ Host {host_dict['hostname']} is not initialized")
+            print("Run: kbisect init <good> <bad> (or kbisect deploy) first")
+            return 1
+
     # Create bisect config
     config = create_bisect_config(config_dict, args)
 
@@ -1242,14 +1256,30 @@ def cmd_build(args: argparse.Namespace) -> int:
     bisect = BisectMaster(config, "dummy", "dummy")
 
     # Run build-only operation
-    success = bisect.build_only(args.commit, save_logs=args.save_logs)
-
-    if success:
-        print("\n✓ Build complete on all hosts")
-        return 0
-    else:
+    if not bisect.build_only(args.commit, save_logs=args.save_logs):
         print("\n✗ Build failed on one or more hosts")
         return 1
+
+    print("\n✓ Build complete on all hosts")
+
+    # Optionally reboot into the newly built kernel
+    if args.reboot:
+        print(f"\nRebooting {len(config.hosts)} host(s) into new kernel...")
+        all_rebooted = True
+        for host_manager in bisect.host_managers:
+            success, kernel_ver, error = bisect._reboot_host(host_manager, 0, None)
+            hostname = host_manager.config.hostname
+            if success:
+                print(f"  ✓ {hostname}: booted {kernel_ver or 'unknown'}")
+            else:
+                all_rebooted = False
+                print(f"  ✗ {hostname}: {error or 'reboot failed'}")
+        if not all_rebooted:
+            print("\n✗ Reboot failed on one or more hosts")
+            return 1
+        print("\n✓ All hosts rebooted")
+
+    return 0
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -1372,12 +1402,18 @@ def create_parser() -> argparse.ArgumentParser:
     parser_metadata_export.add_argument("--format", choices=["json", "yaml"], default="json", help="Output format")
 
     # build command
-    parser_build = subparsers.add_parser("build", help="Build kernel for a specific commit (no reboot, no tests)")
+    parser_build = subparsers.add_parser("build", help="Build kernel for a specific commit (no tests)")
     parser_build.add_argument("commit", help="Commit hash to build (full 40-char SHA or short form)")
     parser_build.add_argument(
         "--save-logs",
         action="store_true",
         help="Save build logs to database (creates temporary session)",
+    )
+    parser_build.add_argument(
+        "-r",
+        "--reboot",
+        action="store_true",
+        help="Reboot hosts into the newly built kernel after building",
     )
 
     return parser
